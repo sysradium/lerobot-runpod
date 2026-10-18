@@ -178,9 +178,8 @@ class SetupScreen(Screen):
         self.query_one("#steps", Input).value = str(p.steps)
         self.query_one("#batch", Input).value = str(p.batch)
         self.query_one("#max_hours", Input).value = str(p.max_hours)
-        base = f", fine-tuned from {p.base_model}" if p.base_model else ""
         self.query_one("#policy-hint", Static).update(
-            f"{p.name}: {p.description}{base}. COMMUNITY cloud is cheaper but less reliable."
+            f"{p.name}: {p.description}. COMMUNITY cloud is cheaper but less reliable."
         )
 
     def action_refresh(self) -> None:

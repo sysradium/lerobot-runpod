@@ -3,6 +3,8 @@
 Train [LeRobot](https://github.com/huggingface/lerobot) policies on [RunPod](https://www.runpod.io) GPUs
 from datasets you recorded in **LeLab**, and get the trained model back into LeLab as a finished run.
 
+![lerobot-runpod TUI: pick a dataset, policy and GPU, confirm the plan, watch training](docs/demo.gif)
+
 ```
 LeLab dataset ──> (Hub, private) ──> RunPod pod: lerobot-train ──> model pushed to a private HF repo
                                                                          │
@@ -128,21 +130,3 @@ Adding one is a row in `src/lerobot_runpod/policies.py`.
   non-root on some hosts.
 - If CUDA doesn't work on the host, the pod fails fast in the `env` stage instead of letting lerobot
   silently train on the CPU.
-
-## Layout
-
-```
-src/lerobot_runpod/
-  cli.py         argparse entry point; no subcommand starts the TUI
-  tui.py         Textual app (setup screen, run screen)
-  runner.py      pre-flight checks and the pod lifecycle, shared by CLI and TUI
-  plan.py        TrainPlan: names, deadline, pod env/command, redaction, lerobot ref
-  bootstrap.sh   runs inside the pod: install, CUDA check, download, train, self-destruct
-  logs.py        log line parser (tqdm frames, loss lines, markers) and two-phase log follower
-  deliver.py     job.json + checkpoint layout for LeLab, `fetch`
-  runpod.py      runpodctl wrapper (GPU offers, pods, logs)
-  hf.py          hf CLI wrapper (whoami, token, downloads, dataset push)
-  datasets.py    LeLab cache discovery
-  cameras.py     camera-name preflight and rename
-  policies.py    policy table
-```
