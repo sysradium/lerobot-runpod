@@ -314,12 +314,14 @@ COMMANDS = {
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command is None:
-        build_parser().print_help()
-        return 0
     if missing := missing_binaries():
         print(f"missing dependency: {', '.join(missing)}", file=sys.stderr)
         return 1
+    if args.command is None:
+        from .tui import run_tui
+
+        run_tui()
+        return 0
     try:
         return COMMANDS[args.command](args)
     except (Abort, RuntimeError, ValueError) as exc:
