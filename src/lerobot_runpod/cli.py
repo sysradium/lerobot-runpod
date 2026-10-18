@@ -62,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--max-hours", type=int, help="hard limit on pod lifetime; the pod deletes itself after"
     )
-    train.add_argument("--cloud", default="SECURE", type=str.upper, choices=runpod.CLOUDS)
+    train.add_argument("--cloud", default="COMMUNITY", type=str.upper, choices=runpod.CLOUDS)
     train.add_argument("--gpu", help='RunPod gpu id, e.g. "NVIDIA GeForce RTX 4090" (default: cheapest fit)')
     train.add_argument("--repo", help="model repo to push to (default <hf_user>/<policy>_<dataset>_<ts>)")
     train.add_argument(
@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     gpus = sub.add_parser("gpus", help="list RunPod GPUs with prices")
     gpus.add_argument("--min-vram", type=int, default=24)
-    gpus.add_argument("--cloud", default="SECURE", type=str.upper, choices=runpod.CLOUDS)
+    gpus.add_argument("--cloud", default="COMMUNITY", type=str.upper, choices=runpod.CLOUDS)
 
     pods = sub.add_parser("pods", help="list (and delete) lerobot-* pods")
     pods.add_argument("--delete", metavar="POD_ID", action="append", default=[], help="delete this pod")
