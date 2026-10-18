@@ -28,7 +28,9 @@ class Result:
     stderr: str
 
 
-def run(cmd: Sequence[str], *, check: bool = True, timeout: float | None = 120, cwd: str | None = None) -> Result:
+def run(
+    cmd: Sequence[str], *, check: bool = True, timeout: float | None = 120, cwd: str | None = None
+) -> Result:
     proc = subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout, cwd=cwd)
     if check and proc.returncode != 0:
         raise CommandError(cmd, proc.returncode, proc.stdout, proc.stderr)

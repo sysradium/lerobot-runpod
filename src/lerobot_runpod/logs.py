@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import queue
 import re
@@ -66,9 +67,7 @@ Event = Stage | Done | Failed | Warn | Progress | Metrics | Log
 _STAGE = re.compile(r"@@STAGE (\S+?)@@")
 _FAILED = re.compile(r"@@FAILED (.*?)@@")
 _WARN = re.compile(r"@@WARN (.*?)@@")
-_TQDM = re.compile(
-    r"(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*(\?|[\d.]+)\s*(s/step|step/s|s/it|it/s)"
-)
+_TQDM = re.compile(r"(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*(\?|[\d.]+)\s*(s/step|step/s|s/it|it/s)")
 _STEP = re.compile(r"\bstep:([\d.]+)([KMBT]?)")
 # leading space: otherwise it matches kld_loss / losses_after_forward
 _LOSS = re.compile(r" loss:([\d.]+)")
@@ -207,10 +206,8 @@ class _Stream:
     def close(self) -> None:
         if self._proc.poll() is None:
             self._proc.kill()
-        try:
+        with contextlib.suppress(subprocess.TimeoutExpired):
             self._proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
 
 
 class LogFollower:

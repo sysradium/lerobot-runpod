@@ -88,9 +88,7 @@ def test_with_fresh_deadline_moves_forward():
 
 
 def test_default_repo():
-    assert (
-        plan.default_repo("me", "act", "ds", datetime(2026, 10, 18, 21, 41)) == "me/act_ds_20261018_2141"
-    )
+    assert plan.default_repo("me", "act", "ds", datetime(2026, 10, 18, 21, 41)) == "me/act_ds_20261018_2141"
 
 
 def test_lerobot_ref_without_checkout():

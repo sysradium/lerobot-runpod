@@ -64,7 +64,9 @@ def test_normalize_cloud():
 
 
 def test_create_command_shape():
-    cmd = runpod.create_command(name="lerobot-act-1", gpu_id="NVIDIA GeForce RTX 3090", cloud="community", env={"A": "1"})
+    cmd = runpod.create_command(
+        name="lerobot-act-1", gpu_id="NVIDIA GeForce RTX 3090", cloud="community", env={"A": "1"}
+    )
     assert cmd[:3] == ["runpodctl", "pod", "create"]
     assert cmd[cmd.index("--cloud-type") + 1] == "COMMUNITY"
     assert cmd[cmd.index("--env") + 1] == '{"A":"1"}'
@@ -75,7 +77,12 @@ def test_create_command_shape():
 
 def test_create_pod_capacity_error(monkeypatch):
     def fake_run(cmd, **kwargs):
-        raise CommandError(cmd, 1, "", "Error: There are no longer any instances available with the requested specifications.")
+        raise CommandError(
+            cmd,
+            1,
+            "",
+            "Error: There are no longer any instances available with the requested specifications.",
+        )
 
     monkeypatch.setattr(runpod, "run", fake_run)
     with pytest.raises(runpod.CapacityError):

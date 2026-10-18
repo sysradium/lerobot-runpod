@@ -119,5 +119,7 @@ def test_append_log(tmp_path):
 def test_job_record_validates_against_lelab(tmp_path):
     record = deliver.job_record(make_info(base_model=None), tmp_path / "job")
     code = "import sys; from lelab.jobs import JobRecord; JobRecord.model_validate_json(sys.stdin.read())"
-    proc = subprocess.run([str(LELAB_PYTHON), "-c", code], input=json.dumps(record), capture_output=True, text=True)
+    proc = subprocess.run(
+        [str(LELAB_PYTHON), "-c", code], input=json.dumps(record), capture_output=True, text=True
+    )
     assert proc.returncode == 0, proc.stderr

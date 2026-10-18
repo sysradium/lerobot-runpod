@@ -60,13 +60,13 @@ def list_gpus() -> list[GpuOffer]:
 
 
 def filter_offers(offers: list[GpuOffer], min_vram_gb: int, cloud: str) -> list[GpuOffer]:
-    usable = [
-        o for o in offers if o.available and o.memory_gb >= min_vram_gb and o.price(cloud) is not None
-    ]
+    usable = [o for o in offers if o.available and o.memory_gb >= min_vram_gb and o.price(cloud) is not None]
     return sorted(usable, key=lambda o: (o.price(cloud), -o.memory_gb))
 
 
-def create_command(*, name: str, gpu_id: str, cloud: str, env: dict[str, str], image: str = IMAGE) -> list[str]:
+def create_command(
+    *, name: str, gpu_id: str, cloud: str, env: dict[str, str], image: str = IMAGE
+) -> list[str]:
     return [
         "runpodctl", "pod", "create",
         "--image", image,

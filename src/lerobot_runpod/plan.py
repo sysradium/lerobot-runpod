@@ -33,7 +33,9 @@ def resolve_lerobot_ref(src: Path | None) -> LerobotRef:
     """The pod installs lerobot from GitHub at the local checkout's commit so it trains with the
     same code; fall back to origin/main if HEAD isn't pushed."""
     if src is None:
-        return LerobotRef(FALLBACK_LEROBOT_REF, "no local lerobot checkout found; the pod will use lerobot@main")
+        return LerobotRef(
+            FALLBACK_LEROBOT_REF, "no local lerobot checkout found; the pod will use lerobot@main"
+        )
     git = ["git", "-C", str(src)]
     run([*git, "fetch", "-q", "origin", "main"], check=False, timeout=60)
     if run([*git, "merge-base", "--is-ancestor", "HEAD", "origin/main"], check=False).returncode == 0:
@@ -42,8 +44,12 @@ def resolve_lerobot_ref(src: Path | None) -> LerobotRef:
             return LerobotRef(head)
     main = run([*git, "rev-parse", "origin/main"], check=False).stdout.strip()
     if main:
-        return LerobotRef(main, f"local lerobot HEAD isn't on origin/main; the pod will use origin/main {main[:8]}")
-    return LerobotRef(FALLBACK_LEROBOT_REF, f"could not read git state of {src}; the pod will use lerobot@main")
+        return LerobotRef(
+            main, f"local lerobot HEAD isn't on origin/main; the pod will use origin/main {main[:8]}"
+        )
+    return LerobotRef(
+        FALLBACK_LEROBOT_REF, f"could not read git state of {src}; the pod will use lerobot@main"
+    )
 
 
 @dataclass(frozen=True)

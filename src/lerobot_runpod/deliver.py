@@ -119,7 +119,9 @@ def append_log(path: Path, message: str, timestamp: float | None = None) -> None
         fh.write(json.dumps({"timestamp": timestamp or time.time(), "message": message}) + "\n")
 
 
-def fetch(repo: str, *, steps: int | None = None, policy: str | None = None, dataset: str | None = None) -> Path:
+def fetch(
+    repo: str, *, steps: int | None = None, policy: str | None = None, dataset: str | None = None
+) -> Path:
     """Deliver an already-trained model from the Hub, e.g. after the laptop slept through a run."""
     now = datetime.now()
     staging = outputs_dir() / f".fetch_{now:%Y%m%d_%H%M%S}"

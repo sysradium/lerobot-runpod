@@ -86,8 +86,14 @@ def test_info_glued_to_an_earlier_frame_is_not_dropped():
         ("@@DONE@@", Done()),
         ("@@FAILED train rc=1@@", Failed("train rc=1")),
         ("@@FAILED timeout: hit the 6h limit@@", Failed("timeout: hit the 6h limit")),
-        ("@@WARN no RUNPOD_API_KEY: this pod cannot delete itself@@", Warn("no RUNPOD_API_KEY: this pod cannot delete itself")),
-        ("INFO 2026-10-18 21:00:33 ot_train.py:800 cfg.steps=10000 (10K)", Log("INFO 2026-10-18 21:00:33 ot_train.py:800 cfg.steps=10000 (10K)")),
+        (
+            "@@WARN no RUNPOD_API_KEY: this pod cannot delete itself@@",
+            Warn("no RUNPOD_API_KEY: this pod cannot delete itself"),
+        ),
+        (
+            "INFO 2026-10-18 21:00:33 ot_train.py:800 cfg.steps=10000 (10K)",
+            Log("INFO 2026-10-18 21:00:33 ot_train.py:800 cfg.steps=10000 (10K)"),
+        ),
     ],
 )
 def test_markers(line, event):
@@ -101,7 +107,9 @@ def test_blank_lines_are_ignored():
 
 def test_parse_record():
     raw = json.dumps({"source": "container", "line": "@@STAGE env@@", "ts": "2026-10-18T21:00:03.122211573Z"})
-    assert logs.parse_record(raw) == logs.Record("container", "@@STAGE env@@", "2026-10-18T21:00:03.122211573Z")
+    assert logs.parse_record(raw) == logs.Record(
+        "container", "@@STAGE env@@", "2026-10-18T21:00:03.122211573Z"
+    )
     assert logs.parse_record("not json\n").line == "not json"
 
 
@@ -189,4 +197,7 @@ def test_phase2_reconnects_and_dedupes_by_ts():
 
 
 def test_phase2_reports_pod_gone():
-    assert follower(FakePopen([[]]), pod_exists=lambda pod: False).follow_container(lambda line: False) == "pod_gone"
+    assert (
+        follower(FakePopen([[]]), pod_exists=lambda pod: False).follow_container(lambda line: False)
+        == "pod_gone"
+    )
