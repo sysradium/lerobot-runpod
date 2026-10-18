@@ -186,7 +186,7 @@ _EOF = object()
 
 
 class _Stream:
-    def __init__(self, cmd: list[str], popen: Callable[..., subprocess.Popen]):
+    def __init__(self, cmd: list[str], popen: Callable[..., subprocess.Popen[str]]):
         self._proc = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
         self._queue: queue.Queue[object] = queue.Queue()
         threading.Thread(target=self._pump, daemon=True).start()
@@ -223,7 +223,7 @@ class LogFollower:
         pod_id: str,
         *,
         stop: threading.Event | None = None,
-        popen: Callable[..., subprocess.Popen] = subprocess.Popen,
+        popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
         pod_exists: Callable[[str], bool] = runpod.pod_exists,
         container_started: Callable[[str], bool] = runpod.container_started,
         quiet_timeout: float = 30,

@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from .config import SKIP_DATASET_OWNERS, lerobot_home
 
@@ -18,7 +19,7 @@ class LocalDataset:
     frames: int
     fps: int
     mtime: float
-    info: dict
+    info: dict[str, Any]
 
     @property
     def owner(self) -> str:
@@ -77,5 +78,5 @@ def local_path(dataset_id: str, home: Path | None = None) -> Path:
     return (home or lerobot_home()) / dataset_id
 
 
-def camera_keys(info: dict) -> list[str]:
+def camera_keys(info: dict[str, Any]) -> list[str]:
     return sorted(k for k, v in info.get("features", {}).items() if v.get("dtype") in ("video", "image"))

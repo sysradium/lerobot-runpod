@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from .shell import CommandError, run
 
@@ -42,7 +43,7 @@ def dataset_exists(repo_id: str) -> bool:
     return run(["hf", "datasets", "info", repo_id], check=False).returncode == 0
 
 
-def download_json(repo_id: str, filename: str, repo_type: str = "model") -> dict:
+def download_json(repo_id: str, filename: str, repo_type: str = "model") -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as tmp:
         cmd = ["hf", "download", repo_id, filename, "--local-dir", tmp, "--quiet"]
         if repo_type != "model":
@@ -51,7 +52,10 @@ def download_json(repo_id: str, filename: str, repo_type: str = "model") -> dict
             run(cmd, timeout=300)
         except CommandError as exc:
             raise HfError(f"could not fetch {repo_id}/{filename}") from exc
-        return json.loads((Path(tmp) / filename).read_text())
+        data = json.loads((Path(tmp) / filename).read_text())
+    if not isinstance(data, dict):
+        raise HfError(f"{repo_id}/{filename} is not a JSON object")
+    return data
 
 
 def download_repo(repo_id: str, local_dir: Path) -> None:

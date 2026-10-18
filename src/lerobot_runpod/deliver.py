@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from . import hf
 from .config import outputs_dir
@@ -35,7 +36,7 @@ def job_id(policy: str, dataset_name: str, when: datetime, runner: str = "runpod
     return f"{policy}_{runner}_{dataset_name}_{when:%Y-%m-%d_%H-%M-%S}"
 
 
-def job_record(info: JobInfo, job_dir: Path) -> dict:
+def job_record(info: JobInfo, job_dir: Path) -> dict[str, Any]:
     """The shape LeLab's pydantic JobRecord accepts.
 
     runner="imported" with hf_repo_id=None makes LeLab read checkpoints from
@@ -158,8 +159,9 @@ def fetch(
     return job_dir
 
 
-def _read_json(path: Path) -> dict:
+def _read_json(path: Path) -> dict[str, Any]:
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return {}
+    return data if isinstance(data, dict) else {}

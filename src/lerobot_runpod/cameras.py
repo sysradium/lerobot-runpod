@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 from . import hf
 from .datasets import camera_keys
@@ -37,11 +38,11 @@ class CameraCheck:
         )
 
 
-def model_camera_keys(config: dict) -> list[str]:
+def model_camera_keys(config: dict[str, Any]) -> list[str]:
     return sorted(k for k, v in config.get("input_features", {}).items() if v.get("type") == "VISUAL")
 
 
-def compare(model_config: dict, dataset_info: dict) -> CameraCheck:
+def compare(model_config: dict[str, Any], dataset_info: dict[str, Any]) -> CameraCheck:
     return CameraCheck(model=model_camera_keys(model_config), dataset=camera_keys(dataset_info))
 
 

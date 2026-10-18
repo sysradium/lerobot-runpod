@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 
 from .config import CONTAINER_DISK_GB, IMAGE, MIN_CUDA_VERSION, POD_NAME_PREFIX
 from .shell import CommandError, run
@@ -30,7 +31,7 @@ class GpuOffer:
     stock: str | None
 
     @classmethod
-    def from_json(cls, row: dict) -> GpuOffer:
+    def from_json(cls, row: dict[str, Any]) -> GpuOffer:
         return cls(
             gpu_id=row["gpuId"],
             memory_gb=int(row.get("memoryInGb") or 0),
@@ -111,11 +112,16 @@ def delete_pod(pod_id: str) -> bool:
     return run(["runpodctl", "pod", "delete", pod_id], check=False).returncode == 0
 
 
-def list_pods() -> list[dict]:
-    return json.loads(run(["runpodctl", "pod", "list"]).stdout or "[]")
+def list_pods() -> list[dict[str, Any]]:
+    pods = json.loads(run(["runpodctl", "pod", "list"]).stdout or "[]")
+    # an error comes back as a JSON object; treating it as "no pods" would make
+    # a live pod look gone to the log follower
+    if not isinstance(pods, list):
+        raise RunPodError(f"unexpected pod list output: {str(pods)[:200]}")
+    return [p for p in pods if isinstance(p, dict)]
 
 
-def own_pods(pods: list[dict]) -> list[dict]:
+def own_pods(pods: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [p for p in pods if str(p.get("name", "")).startswith(POD_NAME_PREFIX)]
 
 
