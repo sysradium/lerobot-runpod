@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from conftest import make_dataset
-
 from lerobot_runpod import datasets, hf
 
 
-def test_discover_sorts_newest_first_and_skips_reserved_dirs(lerobot_home):
-    make_dataset(lerobot_home, "sysradium/old", mtime=1_000)
-    make_dataset(lerobot_home, "local/new", episodes=50, frames=26903, fps=30, mtime=2_000)
+def test_discover_sorts_newest_first_and_skips_reserved_dirs(make_dataset, lerobot_home):
+    make_dataset("sysradium/old", mtime=1_000)
+    make_dataset("local/new", episodes=50, frames=26903, fps=30, mtime=2_000)
     for reserved in ("outputs", "calibration", "ports", "robots", "inference_logs"):
-        make_dataset(lerobot_home, f"{reserved}/thing", mtime=3_000)
+        make_dataset(f"{reserved}/thing", mtime=3_000)
     (lerobot_home / "broken/ds/meta").mkdir(parents=True)
     (lerobot_home / "broken/ds/meta/info.json").write_text("{not json")
 
@@ -30,8 +28,8 @@ def test_hub_id_maps_local_owner_to_hf_user():
     assert datasets.hub_id("someone/pick_cube", "sysradium") == "someone/pick_cube"
 
 
-def test_camera_keys_reads_video_and_image_features(lerobot_home):
-    make_dataset(lerobot_home, "a/b", cams=("wrist", "front"))
+def test_camera_keys_reads_video_and_image_features(make_dataset, lerobot_home):
+    make_dataset("a/b", cams=("wrist", "front"))
     (ds,) = datasets.discover()
     assert datasets.camera_keys(ds.info) == ["observation.images.front", "observation.images.wrist"]
 

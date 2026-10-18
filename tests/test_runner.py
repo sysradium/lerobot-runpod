@@ -4,7 +4,6 @@ import json
 from datetime import datetime
 
 import pytest
-from conftest import make_dataset
 
 from lerobot_runpod import cli, policies, runner
 
@@ -86,8 +85,8 @@ def test_follow_pod_gone(lerobot_home):
     assert run.follow(ScriptedFollower([], [], started=False)) == "pod disappeared"
 
 
-def test_check_cameras_uses_local_info_when_not_on_hub(lerobot_home, monkeypatch):
-    make_dataset(lerobot_home, "local/ds", cams=("front",))
+def test_check_cameras_uses_local_info_when_not_on_hub(make_dataset, lerobot_home, monkeypatch):
+    make_dataset("local/ds", cams=("front",))
     status = runner.DatasetStatus("local/ds", "me/ds", False, lerobot_home / "local/ds")
     model = {"input_features": {"observation.images.camera1": {"type": "VISUAL"}}}
     monkeypatch.setattr(runner.hf, "download_json", lambda *a, **k: model)

@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 
-def make_dataset(home: Path, repo_id: str, *, episodes=2, frames=100, fps=30, cams=("front",), mtime=None):
+def _write_dataset(
+    home: Path,
+    repo_id: str,
+    *,
+    episodes: int = 2,
+    frames: int = 100,
+    fps: int = 30,
+    cams: tuple[str, ...] = ("front",),
+    mtime: float | None = None,
+) -> Path:
     meta = home / repo_id / "meta"
     meta.mkdir(parents=True)
     features = {
@@ -30,3 +41,13 @@ def lerobot_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HF_LEROBOT_HOME", str(home))
     return home
+
+
+@pytest.fixture
+def make_dataset(lerobot_home: Path) -> Callable[..., Path]:
+    """Write a minimal LeLab dataset (meta/info.json) under the temp lerobot home."""
+
+    def make(repo_id: str, **kwargs: Any) -> Path:
+        return _write_dataset(lerobot_home, repo_id, **kwargs)
+
+    return make

@@ -26,7 +26,7 @@ uv tool install .            # from a checkout
 lerobot-runpod --help
 ```
 
-For development: `uv sync && uv run pytest`.
+For development: `make sync`, then `make check` (lint + tests); `make help` lists all targets, including `make plan DATASET=...` for a dry run.
 
 ## Usage
 
