@@ -42,7 +42,9 @@ def test_job_id_format():
 def test_job_record_matches_lelab_expectations(tmp_path):
     record = deliver.job_record(make_info(), tmp_path / "job")
     assert record["state"] == "done"
-    assert record["runner"] == "imported"
+    assert record["runner"] == "local"
+    assert record["process_pid"] is None
+    assert record["exit_code"] == 0
     assert record["hf_repo_id"] is None
     assert record["output_dir"] == str(tmp_path / "job" / "run")
     assert record["metrics"] == {
@@ -55,6 +57,8 @@ def test_job_record_matches_lelab_expectations(tmp_path):
     }
     assert record["config"]["policy_repo_id"] == "sysradium/act_second_try_20261018_2141"
     assert record["config"]["policy_base_model_path"] is None
+    assert record["config"]["log_freq"] == 100
+    assert deliver.job_record(make_info(log_freq=25), tmp_path / "job")["config"]["log_freq"] == 25
 
 
 def fake_download(files):
@@ -118,6 +122,35 @@ def test_append_log(tmp_path):
 @pytest.mark.skipif(not LELAB_PYTHON.exists(), reason="LeLab is not installed as a uv tool")
 def test_job_record_validates_against_lelab(tmp_path):
     record = deliver.job_record(make_info(base_model=None), tmp_path / "job")
+    code = "import sys; from lelab.jobs import JobRecord; JobRecord.model_validate_json(sys.stdin.read())"
+    proc = subprocess.run(
+        [str(LELAB_PYTHON), "-c", code], input=json.dumps(record), capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_running_record_points_lelab_at_the_follower(tmp_path):
+    record = deliver.job_record(
+        make_info(current_step=1200), tmp_path / "job", state="running", process_pid=4242
+    )
+    assert (record["state"], record["runner"], record["process_pid"]) == ("running", "local", 4242)
+    assert record["ended_at"] is None and record["exit_code"] is None
+    assert record["metrics"]["current_step"] == 1200 and record["metrics"]["total_steps"] == 200
+
+
+def test_failed_record_keeps_the_reason(tmp_path):
+    path = deliver.write_job(
+        make_info(), tmp_path / "job", state="failed", process_pid=4242, error="pod disappeared"
+    )
+    record = json.loads(path.read_text())
+    assert (record["state"], record["exit_code"], record["process_pid"]) == ("failed", 1, None)
+    assert record["error_message"] == "pod disappeared"
+
+
+@pytest.mark.skipif(not LELAB_PYTHON.exists(), reason="LeLab not installed")
+@pytest.mark.parametrize("state", ["running", "failed", "interrupted"])
+def test_live_records_validate_against_lelab(tmp_path, state):
+    record = deliver.job_record(make_info(current_step=5), tmp_path / "job", state=state, process_pid=4242)
     code = "import sys; from lelab.jobs import JobRecord; JobRecord.model_validate_json(sys.stdin.read())"
     proc = subprocess.run(
         [str(LELAB_PYTHON), "-c", code], input=json.dumps(record), capture_output=True, text=True

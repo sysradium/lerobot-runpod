@@ -11,12 +11,15 @@ from importlib import resources
 from pathlib import Path
 
 from . import runpod
-from .config import FAIL_GRACE_S, FALLBACK_LEROBOT_REF, POD_NAME_PREFIX, outputs_dir
+from .config import FAIL_GRACE_S, FALLBACK_LEROBOT_REF, POD_NAME_PREFIX, lelab_lerobot_ref, outputs_dir
 from .datasets import split_id
 from .policies import Policy
 from .shell import run
 
 TOKEN_PLACEHOLDER = "<HF_TOKEN>"
+# lerobot prints a loss line every log_freq steps; SmolVLA does ~1.5 step/s, so
+# lerobot's default of 100 meant a progress update only once a minute
+DEFAULT_LOG_FREQ = 25
 
 
 def bootstrap_script() -> str:
@@ -27,6 +30,15 @@ def bootstrap_script() -> str:
 class LerobotRef:
     ref: str
     warning: str | None = None
+    note: str | None = None
+
+
+def default_lerobot_ref(src: Path | None) -> LerobotRef:
+    """Train with LeLab's bundled lerobot when LeLab is installed, so the model loads there."""
+    lelab_ref = lelab_lerobot_ref()
+    if lelab_ref:
+        return LerobotRef(lelab_ref, note=f"lerobot {lelab_ref[:8]}: matching the installed LeLab")
+    return resolve_lerobot_ref(src)
 
 
 def resolve_lerobot_ref(src: Path | None) -> LerobotRef:
@@ -64,6 +76,8 @@ class TrainPlan:
     cloud: str
     repo: str
     lerobot_ref: str
+    log_freq: int = DEFAULT_LOG_FREQ
+    fixed_job_id: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
     deadline: int = 0
 
@@ -72,6 +86,8 @@ class TrainPlan:
             raise ValueError("steps and batch must be positive integers")
         if self.max_hours <= 0:
             raise ValueError("max hours must be a positive integer")
+        if self.log_freq <= 0:
+            raise ValueError("log freq must be a positive integer")
         object.__setattr__(self, "cloud", runpod.normalize_cloud(self.cloud))
         if not self.deadline:
             object.__setattr__(self, "deadline", int(self.created_at.timestamp()) + self.max_hours * 3600)
@@ -94,6 +110,8 @@ class TrainPlan:
 
     @property
     def job_id(self) -> str:
+        if self.fixed_job_id:
+            return self.fixed_job_id
         return f"{self.policy.name}_runpod_{self.dataset_name}_{self.created_at:%Y-%m-%d_%H-%M-%S}"
 
     @property
@@ -119,6 +137,11 @@ class TrainPlan:
             "STEPS": str(self.steps),
             "BATCH": str(self.batch),
             "SAVE_FREQ": str(self.save_freq),
+            "LOG_FREQ": str(self.log_freq),
+            # read back by `lerobot-runpod attach` to rebuild this plan from the pod
+            "JOB_ID": self.job_id,
+            "POLICY": self.policy.name,
+            "CLOUD": self.cloud,
             "LEROBOT_REF": self.lerobot_ref,
             "EXTRAS": self.policy.extras_spec,
             "MAX_HOURS": str(self.max_hours),
@@ -137,6 +160,7 @@ class TrainPlan:
             ("policy", self.policy.name),
             ("steps", str(self.steps)),
             ("batch", str(self.batch)),
+            ("log every", f"{self.log_freq} steps"),
             ("lerobot", f"{self.lerobot_ref[:8]} [{self.policy.extras_spec}]"),
             ("gpu", f"{self.gpu_id} ({self.cloud})"),
             ("max time", f"{self.max_hours}h (until {self.deadline_str})"),

@@ -27,31 +27,42 @@ class JobInfo:
     started_at: float
     ended_at: float
     base_model: str | None = None
+    log_freq: int = 100
     loss: float | None = None
     lr: float | None = None
     grad_norm: float | None = None
+    current_step: int | None = None
 
 
 def job_id(policy: str, dataset_name: str, when: datetime, runner: str = "runpod") -> str:
     return f"{policy}_{runner}_{dataset_name}_{when:%Y-%m-%d_%H-%M-%S}"
 
 
-def job_record(info: JobInfo, job_dir: Path) -> dict[str, Any]:
+def job_record(
+    info: JobInfo,
+    job_dir: Path,
+    *,
+    state: str = "done",
+    process_pid: int | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
     """The shape LeLab's pydantic JobRecord accepts.
 
-    runner="imported" with hf_repo_id=None makes LeLab read checkpoints from
-    output_dir/checkpoints/<step>/pretrained_model instead of the Hub.
+    runner="local" makes LeLab read checkpoints from output_dir/checkpoints/<step>.
+    While running, process_pid points at the follower: LeLab re-attaches to a live
+    pid on startup and tails log.jsonl for progress, and its Stop button SIGTERMs it.
     """
+    running = state == "running"
     return {
         "id": info.job_id,
         "name": info.name,
-        "state": "done",
+        "state": state,
         "config": {
             "dataset_repo_id": info.dataset,
             "policy_type": info.policy,
             "steps": info.steps,
             "batch_size": info.batch,
-            "log_freq": 100,
+            "log_freq": info.log_freq,
             "save_freq": info.save_freq,
             "policy_device": "cuda",
             "policy_use_bf16": True,
@@ -61,18 +72,19 @@ def job_record(info: JobInfo, job_dir: Path) -> dict[str, Any]:
         },
         "output_dir": str(job_dir / "run"),
         "started_at": info.started_at,
-        "ended_at": info.ended_at,
-        "exit_code": 0,
-        "error_message": None,
+        "ended_at": None if running else info.ended_at,
+        "exit_code": None if running else (0 if state == "done" else 1),
+        "error_message": error,
         "metrics": {
-            "current_step": info.steps,
+            "current_step": info.steps if state == "done" else (info.current_step or 0),
             "total_steps": info.steps,
             "current_loss": info.loss,
             "current_lr": info.lr,
             "grad_norm": info.grad_norm,
-            "eta_seconds": 0,
+            "eta_seconds": 0 if state == "done" else None,
         },
-        "runner": "imported",
+        "runner": "local",
+        "process_pid": process_pid if running else None,
         "hf_repo_id": None,
         "checkpoint_count": 0,
     }
@@ -99,11 +111,25 @@ def install_checkpoint(job_dir: Path, steps: int, source: Path | None = None) ->
     return ckpt
 
 
-def write_job(info: JobInfo, job_dir: Path) -> Path:
+def write_job(
+    info: JobInfo,
+    job_dir: Path,
+    *,
+    state: str = "done",
+    process_pid: int | None = None,
+    error: str | None = None,
+) -> Path:
     job_dir.mkdir(parents=True, exist_ok=True)
     path = job_dir / "job.json"
-    path.write_text(json.dumps(job_record(info, job_dir), indent=2) + "\n")
+    record = job_record(info, job_dir, state=state, process_pid=process_pid, error=error)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(record, indent=2) + "\n")
+    tmp.replace(path)
     return path
+
+
+def read_job(job_dir: Path) -> dict[str, Any]:
+    return _read_json(job_dir / "job.json")
 
 
 def deliver(info: JobInfo, job_dir: Path) -> Path:
@@ -151,6 +177,7 @@ def fetch(
         steps=steps,
         batch=int(train_cfg.get("batch_size") or 0) or 8,
         save_freq=int(train_cfg.get("save_freq") or 0) or steps,
+        log_freq=int(train_cfg.get("log_freq") or 0) or 100,
         started_at=stamp,
         ended_at=stamp,
         base_model=train_cfg.get("policy", {}).get("pretrained_path"),

@@ -38,10 +38,11 @@ For development: `make sync`, then `make check` (lint + tests); `make help` list
 lerobot-runpod
 ```
 
-Setup screen: pick a dataset from LeLab's cache (newest first), a policy, steps/batch/max hours (filled
-with per-policy defaults), the cloud, and a GPU (filtered by the policy's minimum VRAM, cheapest
-first). **Start** runs the pre-flight checks and shows the full plan, including the worst-case cost,
-before anything is created.
+Setup screen: your running `lerobot-*` pods (refreshed every 30 s; **Attach** opens the run screen
+for one, e.g. after the laptop was closed), then a dataset from LeLab's cache (newest first), a
+policy, steps/batch/max hours (filled with per-policy defaults), the cloud, and a GPU (filtered by the
+policy's minimum VRAM, cheapest first). **Start** runs the pre-flight checks and shows the full plan,
+including the worst-case cost, before anything is created.
 
 Run screen: stage indicator (`pod > starting > install > env > download > train > done`), progress bar
 with step/ETA/it-s, the last loss line, and the scrolling pod log. `x` stops training and deletes the
@@ -60,13 +61,16 @@ lerobot-runpod train --dataset local/pick_cube --policy act --push-dataset --yes
 lerobot-runpod datasets                  # LeLab datasets in the local cache
 lerobot-runpod gpus --min-vram 80        # GPUs with prices
 lerobot-runpod pods                      # your lerobot-* pods
+lerobot-runpod attach [<pod-id>]         # follow a running pod and deliver its model when it finishes
 lerobot-runpod pods --delete <pod-id>    # or --delete-all
 lerobot-runpod fetch sysradium/act_pick_cube_20261018_2141   # deliver an already-trained model
 lerobot-runpod rename-camera local/pick_cube front camera1   # copy a dataset with a camera renamed
 ```
 
-`pods` and `fetch` cover the "laptop was closed mid-run" case: the pod keeps training, pushes the
-model to the Hub on its own and deletes itself afterwards; `fetch` then brings the result into LeLab.
+`pods`, `attach` and `fetch` cover the "laptop was closed mid-run" case: the pod keeps training,
+pushes the model to the Hub on its own and deletes itself afterwards. `attach` picks a still-running
+pod back up (it rebuilds the plan from the env vars the pod was created with) and refuses if another
+process is already following it; `fetch` brings in a model whose pod is already gone.
 
 ### Policies
 
@@ -88,13 +92,18 @@ Adding one is a row in `src/lerobot_runpod/policies.py`.
   there is one, otherwise in a throwaway `uv run --with lerobot` environment.
 - **Results** land in `outputs/train/<policy>_runpod_<dataset>_<timestamp>/` in the layout
   `lerobot-train` writes locally (`run/checkpoints/<step>/pretrained_model`, `checkpoints/last`),
-  with a `job.json` that LeLab's job registry accepts (`runner: "imported"`, `hf_repo_id: null`, so
-  LeLab reads the local checkpoints) and a `log.jsonl` with the pod's output. Restart or refresh LeLab
-  to see the run.
-- **lerobot version**: the pod installs lerobot from GitHub at the commit of your local checkout if
-  that commit is on `origin/main`, otherwise at `origin/main`, so training and inference use the same
-  code. The checkout is looked up at `$LEROBOT_SRC`, else `./lerobot` or `../lerobot` relative to the
-  current directory; without one the pod uses `main`.
+  with a `job.json` LeLab's job registry accepts and a `log.jsonl` with the pod's output.
+- **Live progress in LeLab**: while a run is followed, its `job.json` says `state: "running"`,
+  `runner: "local"` with the follower's pid. LeLab re-attaches to such jobs **when it starts** and
+  tails `log.jsonl`, so the run shows LeLab's usual progress bar and loss curves. LeLab doesn't rescan,
+  so start (or restart, `lelab --stop && lelab`) LeLab after the run has begun. LeLab's **Stop** sends
+  the follower SIGTERM, which stops training and deletes the pod. LeLab can't see the follower's exit
+  code, so a run it tailed is shown as "done" even if it failed; the terminal/TUI has the real result.
+- **lerobot version**: by default the pod installs the same lerobot LeLab bundles (read from LeLab's
+  install metadata), so the trained model loads in LeLab; newer lerobot versions save config keys and
+  processor layouts LeLab's version rejects. Without LeLab it uses your local checkout's commit (if
+  it's on `origin/main`, else `origin/main`), looked up at `$LEROBOT_SRC`, `./lerobot` or `../lerobot`.
+  Override with `--lerobot-ref`.
 
 ## Cost and safety
 

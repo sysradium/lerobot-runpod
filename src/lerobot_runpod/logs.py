@@ -215,7 +215,8 @@ class LogFollower:
 
     A `runpodctl pod logs --follow` stream opened before the container exists only ever
     delivers platform (source=system) lines, so phase 1 follows system lines until the
-    container starts, and phase 2 opens a fresh container stream, reconnecting on EOF.
+    container starts, and phase 2 opens a fresh container stream, reconnecting on EOF or
+    when it goes silent for `stall_timeout` (a --follow stream can hang without closing).
     """
 
     def __init__(
@@ -227,6 +228,7 @@ class LogFollower:
         pod_exists: Callable[[str], bool] = runpod.pod_exists,
         container_started: Callable[[str], bool] = runpod.container_started,
         quiet_timeout: float = 30,
+        stall_timeout: float = 120,
         retry_delay: float = 5,
         poll: float = 1,
     ):
@@ -236,6 +238,7 @@ class LogFollower:
         self._pod_exists = pod_exists
         self._container_started = container_started
         self._quiet_timeout = quiet_timeout
+        self._stall_timeout = stall_timeout
         self._retry_delay = retry_delay
         self._poll = poll
 
@@ -281,12 +284,16 @@ class LogFollower:
         while not self.stop.is_set():
             stream = _Stream(runpod.logs_command(self.pod_id, "container"), self._popen)
             try:
+                quiet = 0.0
                 while not self.stop.is_set():
                     item = stream.get(self._poll)
                     if item is _TIMEOUT:
-                        continue
-                    if item is _EOF:
+                        quiet += self._poll
+                        if quiet < self._stall_timeout:
+                            continue
+                    if item is _TIMEOUT or item is _EOF:
                         break
+                    quiet = 0.0
                     record = parse_record(str(item))
                     key = ts_key(record.ts)
                     # reconnects replay recent history

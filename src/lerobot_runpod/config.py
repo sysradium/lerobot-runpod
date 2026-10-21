@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -37,4 +38,30 @@ def find_lerobot_src(cwd: Path | None = None) -> Path | None:
     for path in lerobot_src_candidates(cwd):
         if (path / ".git").exists():
             return path
+    return None
+
+
+def lelab_tool_dir() -> Path:
+    env = os.environ.get("LELAB_TOOL_DIR")
+    return Path(env).expanduser() if env else Path.home() / ".local/share/uv/tools/lelab"
+
+
+def lelab_lerobot_ref(tool_dir: Path | None = None) -> str | None:
+    """The lerobot commit (or release tag) bundled with the installed LeLab.
+
+    Models saved by a newer lerobot can carry config keys and processor layouts
+    that LeLab's lerobot rejects at inference, so training should match it.
+    """
+    for dist in sorted((tool_dir or lelab_tool_dir()).glob("lib/python*/site-packages/lerobot-*.dist-info")):
+        direct_url = dist / "direct_url.json"
+        if direct_url.exists():
+            try:
+                commit = json.loads(direct_url.read_text()).get("vcs_info", {}).get("commit_id")
+            except (OSError, json.JSONDecodeError):
+                commit = None
+            if commit:
+                return str(commit)
+        version = dist.name.removeprefix("lerobot-").removesuffix(".dist-info")
+        if version:
+            return f"v{version}"
     return None

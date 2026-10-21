@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import signal
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import Any
 
 from rich.text import Text
 from textual import on, work
@@ -41,7 +44,16 @@ class Services:
     token: Callable[[], str] = hf.token
     dataset_status: Callable[[str, str], runner.DatasetStatus] = runner.dataset_status
     check_cameras: Callable[..., object] = runner.check_cameras
-    lerobot_ref: Callable[[], plan.LerobotRef] = lambda: plan.resolve_lerobot_ref(find_lerobot_src())
+    lerobot_ref: Callable[[], plan.LerobotRef] = lambda: plan.default_lerobot_ref(find_lerobot_src())
+    list_pods: Callable[[], list[dict[str, Any]]] = lambda: runpod.own_pods(runpod.list_pods())
+    active_follower: Callable[..., int | None] = runner.active_follower
+
+    def attach_plan(self, pod_id: str) -> plan.TrainPlan:
+        try:
+            offers = self.list_gpus()
+        except Exception:
+            offers = []
+        return runner.plan_from_pod(runpod.get_pod(pod_id), offers)
 
     def push_dataset(self, status: runner.DatasetStatus) -> None:
         hf.push_dataset(status.hub_dataset, status.local_path, find_lerobot_src())
@@ -100,8 +112,9 @@ class SetupScreen(Screen):
     DEFAULT_CSS = """
     SetupScreen { layout: vertical; padding: 0 1; }
     SetupScreen .title { margin-top: 1; text-style: bold; }
-    #datasets { height: 10; }
-    #gpus { height: 1fr; min-height: 6; }
+    #pods { height: auto; max-height: 5; }
+    #datasets { height: 1fr; min-height: 4; }
+    #gpus { height: 1fr; min-height: 4; }
     #params { height: auto; margin-top: 1; }
     #params > Vertical { width: 1fr; height: auto; margin-right: 1; }
     #params Input, #params Select { width: 100%; }
@@ -116,9 +129,12 @@ class SetupScreen(Screen):
         self.offers: list[runpod.GpuOffer] = []
         self.dataset_rows: list[datasets.LocalDataset] = []
         self.gpu_rows: list[runpod.GpuOffer] = []
+        self.pod_rows: list[dict[str, Any]] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield Label("Running pods", id="pods-title", classes="title")
+        yield DataTable(id="pods", cursor_type="row", zebra_stripes=True)
         yield Label("LeLab datasets (newest first)", classes="title")
         yield DataTable(id="datasets", cursor_type="row", zebra_stripes=True)
         with Horizontal(id="params"):
@@ -152,15 +168,19 @@ class SetupScreen(Screen):
         yield DataTable(id="gpus", cursor_type="row", zebra_stripes=True)
         with Horizontal(id="bottom"):
             yield Static("", id="status")
+            yield Button("Attach", id="attach")
             yield Button("Start", id="start", variant="success")
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one("#datasets", DataTable).add_columns("modified", "dataset", "episodes", "frames", "fps")
         self.query_one("#gpus", DataTable).add_columns("price", "vram", "stock", "gpu")
+        self.query_one("#pods", DataTable).add_columns("pod", "name", "gpu", "price", "status")
         self._apply_policy_defaults()
         self.load_datasets()
         self.load_gpus()
+        self.load_pods()
+        self.set_interval(30, self.load_pods)
 
     @property
     def policy(self) -> policies.Policy:
@@ -196,6 +216,56 @@ class SetupScreen(Screen):
             table.add_row(d.modified, d.repo_id, str(d.episodes), str(d.frames), str(d.fps))
         if not found:
             self.set_status("no LeLab datasets found; record one in LeLab first")
+
+    @work(exclusive=True, group="pods")
+    async def load_pods(self) -> None:
+        try:
+            pods = await asyncio.to_thread(self.services.list_pods)
+        except Exception as exc:
+            self.query_one("#pods-title", Label).update(f"Running pods (could not list: {exc})")
+            return
+        self.pod_rows = pods
+        table = self.query_one("#pods", DataTable)
+        table.clear()
+        for p in pods:
+            price = p.get("costPerHr")
+            table.add_row(
+                str(p.get("id", "")),
+                str(p.get("name", "")),
+                str(p.get("gpuId") or "-"),
+                f"${price:.2f}/h" if isinstance(price, int | float) else "-",
+                str(p.get("desiredStatus") or "-"),
+            )
+        self.query_one("#pods-title", Label).update(
+            f"Running pods ({len(pods)}) — select one and press Attach to follow it"
+            if pods
+            else "Running pods (none)"
+        )
+
+    @on(Button.Pressed, "#attach")
+    def attach_pressed(self) -> None:
+        if not self.pod_rows:
+            self.notify("no running lerobot-* pods", severity="warning")
+            return
+        pod = self.pod_rows[self.query_one("#pods", DataTable).cursor_row]
+        self.attach(str(pod.get("id")))
+
+    @work(exclusive=True, group="start")
+    async def attach(self, pod_id: str) -> None:
+        self.set_status(f"reading pod {pod_id}...")
+        try:
+            train_plan = await asyncio.to_thread(self.services.attach_plan, pod_id)
+        except Exception as exc:
+            self.set_status(f"[red]{exc}[/red]")
+            self.notify(str(exc), severity="error", timeout=15)
+            return
+        other = await asyncio.to_thread(self.services.active_follower, train_plan.job_dir)
+        if other:
+            self.set_status(f"[red]pid {other} is already following {pod_id}[/red]")
+            self.notify(f"pid {other} is already following {pod_id}", severity="error", timeout=15)
+            return
+        self.set_status("")
+        self.app.push_screen(RunScreen(self.services, train_plan, "", attach_pod=pod_id))
 
     @work(exclusive=True, group="gpus")
     async def load_gpus(self) -> None:
@@ -332,11 +402,14 @@ class RunScreen(Screen):
     #log { height: 1fr; margin-top: 1; border: round $panel; }
     """
 
-    def __init__(self, services: Services, train_plan: plan.TrainPlan, token: str):
+    def __init__(
+        self, services: Services, train_plan: plan.TrainPlan, token: str, attach_pod: str | None = None
+    ):
         super().__init__()
         self.services = services
         self.train_plan = train_plan
         self.training = services.make_run(train_plan, token, self._emit)
+        self.attach_pod = attach_pod
         self.stage = "pod"
         self.finished = False
 
@@ -426,7 +499,11 @@ class RunScreen(Screen):
     def drive(self) -> None:
         run = self.training
         try:
-            run.create_pod()
+            if self.attach_pod:
+                run.attach(self.attach_pod)
+                self._emit(runner.PodCreated(self.attach_pod, run.plan.deadline))
+            else:
+                run.create_pod()
         except runpod.CapacityError as exc:
             self.app.call_from_thread(self._back_to_setup, str(exc))
             return
@@ -519,6 +596,21 @@ class LerobotRunpodApp(App):
 
     def on_mount(self) -> None:
         self.push_screen(SetupScreen(self.services))
+        # no SIGTERM handlers on Windows event loops
+        with contextlib.suppress(NotImplementedError, RuntimeError):
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, self._on_sigterm)
+
+    def _on_sigterm(self) -> None:
+        self.run_worker(self._terminate(), exclusive=True, group="terminate")
+
+    async def _terminate(self) -> None:
+        """LeLab's Stop button SIGTERMs the follower: stop training and delete the pod."""
+        for screen in self.screen_stack:
+            if isinstance(screen, RunScreen) and screen.training.pod_id:
+                screen.training.stop.set()
+                await asyncio.to_thread(screen.training.mark, "interrupted", "stopped from LeLab")
+                await asyncio.to_thread(screen.training.delete_pod)
+        self.exit(message="stopped from LeLab; pod deleted")
 
     async def action_quit(self) -> None:
         # never leave a billing pod behind silently

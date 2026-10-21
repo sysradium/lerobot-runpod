@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
+from types import FrameType
 
 from . import __version__, cameras, datasets, deliver, hf, logs, plan, policies, runner, runpod
 from .config import find_lerobot_src, lerobot_home
@@ -28,6 +30,14 @@ def bold(msg: str) -> None:
 
 class Abort(Exception):
     pass
+
+
+class Terminated(KeyboardInterrupt):
+    """SIGTERM, e.g. LeLab's Stop button on a running job: stop and delete the pod."""
+
+
+def _raise_terminated(signum: int, frame: FrameType | None) -> None:
+    raise Terminated()
 
 
 def confirm(question: str, *, default: bool = False, assume_yes: bool = False) -> bool:
@@ -62,6 +72,15 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--max-hours", type=int, help="hard limit on pod lifetime; the pod deletes itself after"
     )
+    train.add_argument(
+        "--log-freq",
+        type=int,
+        help=f"print a loss line every N steps (default: {plan.DEFAULT_LOG_FREQ})",
+    )
+    train.add_argument(
+        "--lerobot-ref",
+        help="lerobot git ref to train with (default: the one bundled with LeLab, else the local checkout)",
+    )
     train.add_argument("--cloud", default="COMMUNITY", type=str.upper, choices=runpod.CLOUDS)
     train.add_argument("--gpu", help='RunPod gpu id, e.g. "NVIDIA GeForce RTX 4090" (default: cheapest fit)')
     train.add_argument("--repo", help="model repo to push to (default <hf_user>/<policy>_<dataset>_<ts>)")
@@ -83,6 +102,15 @@ def build_parser() -> argparse.ArgumentParser:
     pods.add_argument("--delete", metavar="POD_ID", action="append", default=[], help="delete this pod")
     pods.add_argument("--delete-all", action="store_true", help="delete every lerobot-* pod")
     pods.add_argument("--yes", "-y", action="store_true")
+
+    attach = sub.add_parser(
+        "attach", help="follow a running lerobot-* pod and deliver its model into LeLab when it finishes"
+    )
+    attach.add_argument("pod_id", nargs="?", help="pod to follow (default: the only running lerobot-* pod)")
+    attach.add_argument("--yes", "-y", action="store_true", help="delete the pod without asking if it fails")
+    attach.add_argument(
+        "--force", action="store_true", help="attach even if another process is already following it"
+    )
 
     fetch = sub.add_parser("fetch", help="deliver an already-trained HF model into LeLab")
     fetch.add_argument("repo")
@@ -182,7 +210,12 @@ def prepare(args: argparse.Namespace) -> tuple[plan.TrainPlan, str]:
         check = runner.check_cameras(policy, status)
         info(f"cameras match {policy.base_model}: {', '.join(check.dataset) if check else '-'}")
 
-    ref = plan.resolve_lerobot_ref(find_lerobot_src())
+    if args.lerobot_ref:
+        ref = plan.LerobotRef(args.lerobot_ref)
+    else:
+        ref = plan.default_lerobot_ref(find_lerobot_src())
+    if ref.note:
+        info(ref.note)
     if ref.warning:
         warn(ref.warning)
 
@@ -197,6 +230,7 @@ def prepare(args: argparse.Namespace) -> tuple[plan.TrainPlan, str]:
         steps=args.steps,
         batch=args.batch,
         max_hours=args.max_hours,
+        log_freq=args.log_freq,
         repo=args.repo,
         lerobot_ref=ref.ref,
     )
@@ -259,19 +293,53 @@ def cmd_train(args: argparse.Namespace) -> int:
         run.create_pod()
     except runpod.CapacityError as exc:
         raise Abort(f"{exc}\n   see: lerobot-runpod gpus --cloud {train_plan.cloud}") from exc
+    return follow_and_deliver(run, args.yes)
 
+
+def cmd_attach(args: argparse.Namespace) -> int:
+    pod_id = args.pod_id
+    if not pod_id:
+        own = runpod.own_pods(runpod.list_pods())
+        if len(own) != 1:
+            listing = "\n".join(f"   {p.get('id')}  {p.get('name')}" for p in own) or "   (none)"
+            raise Abort(f"pass a pod id; running lerobot-* pods:\n{listing}")
+        pod_id = str(own[0]["id"])
+    pod = runpod.get_pod(pod_id)
     try:
-        result = run.follow()
-    except KeyboardInterrupt:
-        run.stop.set()
-        print()
-        result = "interrupted"
+        offers = runpod.list_gpus()
+    except Exception:
+        offers = []
+    train_plan = runner.plan_from_pod(pod, offers)
+    other = runner.active_follower(train_plan.job_dir)
+    if other and not args.force:
+        raise Abort(f"pid {other} is already following {pod_id} (pass --force to attach anyway)")
+    print_plan(train_plan)
+    run = runner.TrainingRun(train_plan, "", ConsolePrinter())
+    run.attach(pod_id)
+    return follow_and_deliver(run, args.yes)
 
-    if result != "done":
-        warn(result)
-        warn(f"full log: {run.log_path}")
-        teardown(run, args.yes)
-        return 1
+
+def follow_and_deliver(run: runner.TrainingRun, assume_yes: bool) -> int:
+    train_plan = run.plan
+    previous = signal.signal(signal.SIGTERM, _raise_terminated)
+    try:
+        try:
+            result = run.follow()
+        except KeyboardInterrupt as exc:
+            run.stop.set()
+            print()
+            result = "stopped from LeLab" if isinstance(exc, Terminated) else "interrupted"
+            run.mark("interrupted", error=result)
+            if isinstance(exc, Terminated):
+                assume_yes = True
+
+        if result != "done":
+            warn(result)
+            warn(f"full log: {run.log_path}")
+            teardown(run, assume_yes)
+            return 1
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
     run.delete_pod()
     try:
@@ -307,6 +375,7 @@ COMMANDS = {
     "datasets": cmd_datasets,
     "gpus": cmd_gpus,
     "pods": cmd_pods,
+    "attach": cmd_attach,
     "fetch": cmd_fetch,
     "rename-camera": cmd_rename,
 }

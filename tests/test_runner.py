@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from datetime import datetime
 
 import pytest
@@ -103,3 +105,133 @@ def test_teardown_defaults_to_delete(lerobot_home, monkeypatch):
     cli.teardown(run, assume_yes=False)
     assert deleted == ["pod1"]
     assert run.pod_id is None
+
+
+def test_follow_mirrors_running_then_failed_into_job_json(lerobot_home):
+    run, _ = make_run(lerobot_home)
+    states = []
+    real_mark = run.mark
+
+    def spy(state, error=None):
+        real_mark(state, error)
+        states.append(json.loads((run.plan.job_dir / "job.json").read_text()))
+
+    run.mark = spy
+    run.follow(ScriptedFollower([], ["@@STAGE train@@"]))
+    running, final = states[0], states[-1]
+    assert running["state"] == "running" and running["runner"] == "local"
+    assert running["process_pid"] == os.getpid() and running["ended_at"] is None
+    assert final["state"] == "failed" and final["process_pid"] is None
+    assert final["error_message"] == "pod disappeared"
+
+
+def legacy_pod(**env):
+    base = {
+        "DATASET": "sysradium/second_try_cam1",
+        "REPO": "sysradium/act_second_try_cam1_20261021_2239",
+        "STEPS": "30000",
+        "BATCH": "32",
+        "MAX_HOURS": "4",
+        "DEADLINE": "1792629546",
+        "LOG_FREQ": "25",
+        "LEROBOT_REF": "30da8e68",
+        "POLICY_ARGS": "--policy.type=act",
+    }
+    base.update(env)
+    return {
+        "id": "q2x44ipzuu0xo4",
+        "gpuId": "NVIDIA GeForce RTX 3090",
+        "costPerHr": 0.22,
+        "createdAt": "2026-10-21 20:39:18.98 +0000 UTC",
+        "env": base,
+    }
+
+
+def test_plan_from_pod_uses_stored_job_id_policy_and_cloud(lerobot_home):
+    pod = legacy_pod(JOB_ID="act_runpod_second_try_cam1_2026-10-21_22-39-17", POLICY="act", CLOUD="SECURE")
+    p = runner.plan_from_pod(pod)
+    assert p.job_id == "act_runpod_second_try_cam1_2026-10-21_22-39-17"
+    assert (p.policy.name, p.cloud, p.steps, p.batch, p.log_freq) == ("act", "SECURE", 30000, 32, 25)
+    assert p.deadline == 1792629546 and p.repo.endswith("_2239")
+
+
+def test_plan_from_legacy_pod_infers_policy_cloud_and_job_dir(lerobot_home):
+    created = runner._pod_created(legacy_pod())
+    stamp = created.replace(second=0) if created.second >= 10 else created
+    existing = lerobot_home / "outputs/train" / f"act_runpod_second_try_cam1_{stamp:%Y-%m-%d_%H-%M-%S}"
+    existing.mkdir(parents=True)
+    offers = [runner.runpod.GpuOffer("NVIDIA GeForce RTX 3090", 24, True, 0.46, 0.22, "Low")]
+    p = runner.plan_from_pod(legacy_pod(), offers)
+    assert p.policy.name == "act"
+    assert p.cloud == "COMMUNITY"
+    assert p.job_id == existing.name
+
+
+def test_plan_from_pod_maps_base_model_back_to_policy(lerobot_home):
+    pod = legacy_pod(POLICY_ARGS="--policy.path=lerobot/smolvla_base --policy.scheduler_decay_steps=10000")
+    assert runner.plan_from_pod(pod).policy.name == "smolvla"
+
+
+def test_plan_from_foreign_pod_is_rejected():
+    with pytest.raises(ValueError, match="not created by lerobot-runpod"):
+        runner.plan_from_pod({"id": "x", "env": {"FOO": "1"}})
+
+
+def test_active_follower_ignores_self_and_dead_pids(lerobot_home):
+    run, _ = make_run(lerobot_home)
+    run.mark("running")
+    assert runner.active_follower(run.plan.job_dir) is None  # our own pid
+    record = json.loads((run.plan.job_dir / "job.json").read_text())
+    record["process_pid"] = os.getppid()
+    (run.plan.job_dir / "job.json").write_text(json.dumps(record))
+    assert runner.active_follower(run.plan.job_dir) == os.getppid()
+    record["process_pid"] = 2**22 + 12345
+    (run.plan.job_dir / "job.json").write_text(json.dumps(record))
+    assert runner.active_follower(run.plan.job_dir) is None
+
+
+class TerminatedRun:
+    def __init__(self, train_plan):
+        self.plan = train_plan
+        self.pod_id = "pod1"
+        self.stop = threading.Event()
+        self.log_path = "/tmp/log.jsonl"
+        self.deleted = False
+        self.marks = []
+
+    def follow(self):
+        raise cli.Terminated()
+
+    def mark(self, state, error=None):
+        self.marks.append((state, error))
+
+    def delete_pod(self):
+        self.deleted = True
+        self.pod_id = None
+
+    def kept_message(self):
+        return "kept"
+
+
+def test_sigterm_from_lelab_deletes_the_pod_without_asking(lerobot_home, monkeypatch):
+    run, _ = make_run(lerobot_home)
+    fake = TerminatedRun(run.plan)
+
+    def no_prompt(question, *, default=False, assume_yes=False):
+        assert assume_yes, "must not prompt on SIGTERM"
+        return True
+
+    monkeypatch.setattr(cli, "confirm", no_prompt)
+    assert cli.follow_and_deliver(fake, assume_yes=False) == 1
+    assert fake.deleted
+    assert fake.marks == [("interrupted", "stopped from LeLab")]
+
+
+def test_attach_refuses_when_another_process_follows(lerobot_home, monkeypatch):
+    run, _ = make_run(lerobot_home)
+    monkeypatch.setattr(cli.runpod, "get_pod", lambda pod_id: {"id": pod_id})
+    monkeypatch.setattr(cli.runpod, "list_gpus", lambda: [])
+    monkeypatch.setattr(cli.runner, "plan_from_pod", lambda pod, offers: run.plan)
+    monkeypatch.setattr(cli.runner, "active_follower", lambda job_dir: 4242)
+    with pytest.raises(cli.Abort, match="pid 4242 is already following"):
+        cli.cmd_attach(cli.build_parser().parse_args(["attach", "pod1"]))

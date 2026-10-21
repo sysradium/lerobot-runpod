@@ -121,6 +121,13 @@ def list_pods() -> list[dict[str, Any]]:
     return [p for p in pods if isinstance(p, dict)]
 
 
+def get_pod(pod_id: str) -> dict[str, Any]:
+    pod = json.loads(run(["runpodctl", "pod", "get", pod_id]).stdout or "{}")
+    if not isinstance(pod, dict) or "error" in pod or not pod.get("id"):
+        raise RunPodError(f"pod {pod_id} not found: {str(pod)[:200]}")
+    return pod
+
+
 def own_pods(pods: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [p for p in pods if str(p.get("name", "")).startswith(POD_NAME_PREFIX)]
 

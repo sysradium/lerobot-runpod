@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -121,12 +122,13 @@ def test_ts_key_orders_trimmed_fractions():
 class FakeProc:
     def __init__(self, lines):
         self.stdout = iter(lines)
+        self.killed = False
 
     def poll(self):
         return 0
 
     def kill(self):
-        pass
+        self.killed = True
 
     def wait(self, timeout=None):
         return 0
@@ -194,6 +196,55 @@ def test_phase2_reconnects_and_dedupes_by_ts():
     assert follower(popen).follow_container(on_line) == "finished"
     assert seen == ["@@STAGE install@@", "installing", "@@STAGE env@@", "@@DONE@@"]
     assert len(popen.cmds) == 2
+
+
+class HungProc(FakeProc):
+    """Delivers its lines, then blocks like a --follow stream that stopped sending without closing."""
+
+    def __init__(self, lines):
+        super().__init__(lines)
+        self._release = threading.Event()
+        self.stdout = self._lines(lines)
+
+    def _lines(self, lines):
+        yield from lines
+        self._release.wait(5)
+
+    def poll(self):
+        return None
+
+    def kill(self):
+        super().kill()
+        self._release.set()
+
+
+def test_phase2_restarts_a_stalled_stream():
+    hung = HungProc(
+        [rec("@@STAGE train@@", "2026-10-21T20:51:50Z"), rec("step:3K loss:0.375", "2026-10-21T20:51:54Z")]
+    )
+    fresh = [
+        rec("step:3K loss:0.375", "2026-10-21T20:51:54Z"),
+        rec("step:7K loss:0.183", "2026-10-21T21:05:29Z"),
+        rec("@@DONE@@", "2026-10-21T22:30:00Z"),
+    ]
+    procs = [hung, FakeProc(fresh)]
+    cmds = []
+
+    def popen(cmd, **kwargs):
+        cmds.append(cmd)
+        return procs.pop(0)
+
+    seen = []
+
+    def on_line(line):
+        seen.append(line)
+        return line == "@@DONE@@"
+
+    result = follower(popen, stall_timeout=0.1).follow_container(on_line)
+    assert result == "finished"
+    assert hung.killed
+    assert seen == ["@@STAGE train@@", "step:3K loss:0.375", "step:7K loss:0.183", "@@DONE@@"]
+    assert len(cmds) == 2
 
 
 def test_phase2_reports_pod_gone():
