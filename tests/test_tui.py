@@ -83,7 +83,7 @@ def make_services(tmp_path, runs):
         check_cameras=lambda policy, status: None,
         lerobot_ref=lambda: plan.LerobotRef("abc123"),
         list_pods=lambda: [],
-        active_follower=lambda job_dir: None,
+        active_follower=lambda job_dir, pod_id=None: None,
     )
     services.make_run = make_run
     return services
@@ -194,7 +194,7 @@ POD = {
 def attachable_services(tmp_path, runs, follower=None):
     services = make_services(tmp_path, runs)
     services.list_pods = lambda: [POD]
-    services.active_follower = lambda job_dir: follower
+    services.active_follower = lambda job_dir, pod_id=None: follower
     services.attach_plan = lambda pod_id: runner.build_plan(
         dataset="sysradium/second_try_cam1",
         hub_dataset="sysradium/second_try_cam1",

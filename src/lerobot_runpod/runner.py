@@ -14,6 +14,7 @@ from typing import Any
 
 from . import cameras, datasets, deliver, hf, logs, plan, policies, runpod
 from .config import find_lerobot_src, outputs_dir
+from .shell import run
 
 
 @dataclass(frozen=True)
@@ -123,17 +124,20 @@ def _pod_created(pod: dict[str, Any]) -> datetime:
 
 
 def guess_cloud(gpu_id: str, cost_per_hr: float | None, offers: list[runpod.GpuOffer]) -> str:
-    """Pods created before CLOUD was stored in their env: match the hourly price."""
+    """Pods created before CLOUD was stored in their env: match the hourly price.
+
+    Without a price match (e.g. the GPU list failed) it says UNKNOWN rather than guess.
+    """
     if cost_per_hr is None:
-        return "SECURE"
+        return plan.UNKNOWN_CLOUD
     for o in offers:
-        if (
-            o.gpu_id == gpu_id
-            and o.community_price is not None
-            and abs(o.community_price - cost_per_hr) < 0.005
-        ):
+        if o.gpu_id != gpu_id:
+            continue
+        if o.community_price is not None and abs(o.community_price - cost_per_hr) < 0.005:
             return "COMMUNITY"
-    return "SECURE"
+        if o.secure_price is not None and abs(o.secure_price - cost_per_hr) < 0.005:
+            return "SECURE"
+    return plan.UNKNOWN_CLOUD
 
 
 def find_job_id(policy: str, dataset_name: str, created: datetime, root: Path | None = None) -> str | None:
@@ -192,12 +196,33 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def active_follower(job_dir: Path) -> int | None:
-    """PID of another live process already following this job (per its job.json)."""
+def _ancestors(pid: int) -> set[int]:
+    seen: set[int] = set()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        out = run(["ps", "-o", "ppid=", "-p", str(pid)], check=False).stdout.strip()
+        if not out.isdigit():
+            break
+        pid = int(out)
+    return seen
+
+
+def active_follower(job_dir: Path, pod_id: str | None = None) -> int | None:
+    """PID of another live process already following this job.
+
+    Checks job.json, and (for followers started by older versions, which didn't write
+    one) any local `runpodctl pod logs <pod>` stream that isn't ours.
+    """
     record = deliver.read_job(job_dir)
     pid = record.get("process_pid")
     if record.get("state") == "running" and isinstance(pid, int) and pid != os.getpid() and _pid_alive(pid):
         return pid
+    if pod_id:
+        found = run(["pgrep", "-f", f"runpodctl pod logs {pod_id} "], check=False).stdout.split()
+        for stream in (int(p) for p in found if p.isdigit()):
+            if os.getpid() not in _ancestors(stream):
+                parent = run(["ps", "-o", "ppid=", "-p", str(stream)], check=False).stdout.strip()
+                return int(parent) if parent.isdigit() else stream
     return None
 
 
@@ -277,6 +302,11 @@ class TrainingRun:
     def _on_container_line(self, line: str) -> bool:
         deliver.append_log(self.log_path, line.split("\r")[-1] or line)
         for event in logs.parse_line(line):
+            # an attached run joins mid-way: the @@STAGE train@@ marker is older than the
+            # replayed log history, but training output means that's where we are
+            if isinstance(event, logs.Progress | logs.Metrics) and self.state.stage not in ("train", "done"):
+                self.state.stage = "train"
+                self.emit(logs.Stage("train"))
             match event:
                 case logs.Stage(name):
                     self.state.stage = name

@@ -4,6 +4,7 @@ import json
 import os
 import threading
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -232,6 +233,49 @@ def test_attach_refuses_when_another_process_follows(lerobot_home, monkeypatch):
     monkeypatch.setattr(cli.runpod, "get_pod", lambda pod_id: {"id": pod_id})
     monkeypatch.setattr(cli.runpod, "list_gpus", lambda: [])
     monkeypatch.setattr(cli.runner, "plan_from_pod", lambda pod, offers: run.plan)
-    monkeypatch.setattr(cli.runner, "active_follower", lambda job_dir: 4242)
+    monkeypatch.setattr(cli.runner, "active_follower", lambda job_dir, pod_id=None: 4242)
     with pytest.raises(cli.Abort, match="pid 4242 is already following"):
         cli.cmd_attach(cli.build_parser().parse_args(["attach", "pod1"]))
+
+
+def test_attached_run_infers_train_stage_from_progress(lerobot_home):
+    run, events = make_run(lerobot_home)
+    run.follow(
+        ScriptedFollower(
+            [],
+            [
+                "\rTraining:  82%|████████▏ | 24450/30000 [1:29:48<20:07,  4.60step/s]",
+                "INFO 2026-10-21 22:10:48 ot_train.py:606 step:24K loss:0.088 grdn:5.488 lr:1.0e-05",
+                "@@DONE@@",
+            ],
+        )
+    )
+    stages = [e.name for e in events if isinstance(e, runner.logs.Stage)]
+    assert stages == ["train"]
+    assert run.state.stage == "done"
+
+
+def test_guess_cloud_says_unknown_without_prices():
+    assert runner.guess_cloud("NVIDIA GeForce RTX 3090", 0.22, []) == runner.plan.UNKNOWN_CLOUD
+    offers = [runner.runpod.GpuOffer("NVIDIA GeForce RTX 3090", 24, True, 0.46, 0.22, "Low")]
+    assert runner.guess_cloud("NVIDIA GeForce RTX 3090", 0.46, offers) == "SECURE"
+    assert runner.guess_cloud("NVIDIA GeForce RTX 3090", 0.22, offers) == "COMMUNITY"
+
+
+def test_unknown_cloud_plan_is_allowed_for_attach(lerobot_home):
+    p = runner.plan_from_pod(legacy_pod(), [])
+    assert p.cloud == runner.plan.UNKNOWN_CLOUD
+    assert ("gpu", "NVIDIA GeForce RTX 3090 (UNKNOWN)") in p.summary()
+
+
+def test_active_follower_spots_a_foreign_log_stream(lerobot_home, monkeypatch):
+    run, _ = make_run(lerobot_home)
+    calls = {"pgrep": "7777\n", "ps 7777": "8888", "ps 8888": "1"}
+
+    def fake_run(cmd, check=True, **kw):
+        key = "pgrep" if cmd[0] == "pgrep" else f"ps {cmd[-1]}"
+        return SimpleNamespace(stdout=calls.get(key, ""), returncode=0)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    assert runner.active_follower(run.plan.job_dir, "q2x44ipzuu0xo4") == 8888
+    assert runner.active_follower(run.plan.job_dir) is None

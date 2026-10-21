@@ -310,7 +310,7 @@ def cmd_attach(args: argparse.Namespace) -> int:
     except Exception:
         offers = []
     train_plan = runner.plan_from_pod(pod, offers)
-    other = runner.active_follower(train_plan.job_dir)
+    other = runner.active_follower(train_plan.job_dir, pod_id)
     if other and not args.force:
         raise Abort(f"pid {other} is already following {pod_id} (pass --force to attach anyway)")
     print_plan(train_plan)

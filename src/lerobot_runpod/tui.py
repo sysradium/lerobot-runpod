@@ -49,10 +49,13 @@ class Services:
     active_follower: Callable[..., int | None] = runner.active_follower
 
     def attach_plan(self, pod_id: str) -> plan.TrainPlan:
-        try:
-            offers = self.list_gpus()
-        except Exception:
-            offers = []
+        offers: list[runpod.GpuOffer] = []
+        for _ in range(2):
+            try:
+                offers = self.list_gpus()
+                break
+            except Exception:
+                continue
         return runner.plan_from_pod(runpod.get_pod(pod_id), offers)
 
     def push_dataset(self, status: runner.DatasetStatus) -> None:
@@ -259,7 +262,7 @@ class SetupScreen(Screen):
             self.set_status(f"[red]{exc}[/red]")
             self.notify(str(exc), severity="error", timeout=15)
             return
-        other = await asyncio.to_thread(self.services.active_follower, train_plan.job_dir)
+        other = await asyncio.to_thread(self.services.active_follower, train_plan.job_dir, pod_id)
         if other:
             self.set_status(f"[red]pid {other} is already following {pod_id}[/red]")
             self.notify(f"pid {other} is already following {pod_id}", severity="error", timeout=15)

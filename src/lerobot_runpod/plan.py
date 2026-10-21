@@ -20,6 +20,8 @@ TOKEN_PLACEHOLDER = "<HF_TOKEN>"
 # lerobot prints a loss line every log_freq steps; SmolVLA does ~1.5 step/s, so
 # lerobot's default of 100 meant a progress update only once a minute
 DEFAULT_LOG_FREQ = 25
+# attached pods created before CLOUD was stored in their env, when the price can't tell
+UNKNOWN_CLOUD = "UNKNOWN"
 
 
 def bootstrap_script() -> str:
@@ -88,7 +90,8 @@ class TrainPlan:
             raise ValueError("max hours must be a positive integer")
         if self.log_freq <= 0:
             raise ValueError("log freq must be a positive integer")
-        object.__setattr__(self, "cloud", runpod.normalize_cloud(self.cloud))
+        if self.cloud != UNKNOWN_CLOUD:
+            object.__setattr__(self, "cloud", runpod.normalize_cloud(self.cloud))
         if not self.deadline:
             object.__setattr__(self, "deadline", int(self.created_at.timestamp()) + self.max_hours * 3600)
 
