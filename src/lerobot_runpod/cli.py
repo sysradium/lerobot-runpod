@@ -60,6 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
         "Run without a command for the TUI.",
     )
     parser.add_argument("--version", action="version", version=__version__)
+    # its own dest: the train subparser's --lerobot-ref default would overwrite a shared one
+    parser.add_argument(
+        "--lerobot-ref",
+        dest="tui_lerobot_ref",
+        metavar="REF",
+        help="lerobot git ref for runs started from the TUI (default: the one bundled with LeLab)",
+    )
     sub = parser.add_subparsers(dest="command")
 
     train = sub.add_parser("train", help="train non-interactively")
@@ -76,6 +83,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--log-freq",
         type=int,
         help=f"print a loss line every N steps (default: {plan.DEFAULT_LOG_FREQ})",
+    )
+    train.add_argument(
+        "--train-arg",
+        action="append",
+        metavar="KEY=VALUE",
+        help="extra lerobot-train setting, repeatable, e.g. policy.chunk_size=50 or policy.optimizer_lr=3e-5",
     )
     train.add_argument(
         "--lerobot-ref",
@@ -186,6 +199,10 @@ def pick_gpu(policy: policies.Policy, cloud: str) -> str:
 
 def prepare(args: argparse.Namespace) -> tuple[plan.TrainPlan, str]:
     policy = policies.get(args.policy)
+    try:
+        extra_train_args = plan.parse_train_args(args.train_arg)
+    except ValueError as exc:
+        raise Abort(str(exc)) from exc
     hf_user = hf.whoami()
     token = hf.token()
 
@@ -231,6 +248,7 @@ def prepare(args: argparse.Namespace) -> tuple[plan.TrainPlan, str]:
         batch=args.batch,
         max_hours=args.max_hours,
         log_freq=args.log_freq,
+        extra_train_args=extra_train_args,
         repo=args.repo,
         lerobot_ref=ref.ref,
     )
@@ -389,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         from .tui import run_tui
 
-        run_tui()
+        run_tui(args.tui_lerobot_ref)
         return 0
     try:
         return COMMANDS[args.command](args)

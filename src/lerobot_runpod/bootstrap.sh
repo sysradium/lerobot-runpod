@@ -1,6 +1,6 @@
 # Runs inside the pod (as root), shipped base64-encoded in $BOOT. Parameters
-# arrive as env vars: HF_TOKEN DATASET POLICY_ARGS REPO STEPS BATCH SAVE_FREQ LOG_FREQ
-# MAX_HOURS DEADLINE FAIL_GRACE_S LEROBOT_REF EXTRAS.
+# arrive as env vars: HF_TOKEN DATASET POLICY_ARGS TRAIN_ARGS REPO STEPS BATCH SAVE_FREQ
+# LOG_FREQ MAX_HOURS DEADLINE FAIL_GRACE_S LEROBOT_REF EXTRAS.
 # Markers (@@...@@) drive the local log follower.
 
 export HF_HUB_DISABLE_PROGRESS_BARS=1
@@ -60,27 +60,36 @@ hf download --repo-type dataset "$DATASET" --local-dir "$HF_LEROBOT_HOME/$DATASE
 
 echo "@@STAGE train@@"
 # video decoding becomes the bottleneck on fast GPUs with the default 4 workers
-workers=$(($(nproc) - 1))
+cpus=$(nproc)
+workers=$((cpus - 1))
 [ "$workers" -gt 12 ] && workers=12
-echo "dataloader workers: $workers (of $(nproc) cpus)"
+# deeper prefetch keeps fast GPUs fed when there's CPU to spare; costs only host RAM
+prefetch=4
+[ "$cpus" -ge 32 ] && prefetch=8
 # bf16 autocast (fp32 master weights, so the saved model is unchanged). Newer lerobot
 # takes --accelerator.mixed_precision; 0.6.0 hands Accelerate mixed_precision=None for
 # policies without a dtype field (e.g. ACT), and Accelerate then reads this env var.
 precision=()
 if ! python -c "import torch, sys; sys.exit(0 if torch.cuda.is_bf16_supported() else 1)"; then
-  echo "precision: fp32 (GPU has no bf16)"
+  mode="fp32 (GPU has no bf16)"
 elif lerobot-train --help 2>/dev/null | grep -q -- "--accelerator.mixed_precision"; then
   precision=(--accelerator.mixed_precision=bf16)
-  echo "precision: bf16 (--accelerator.mixed_precision)"
+  mode="bf16 (--accelerator.mixed_precision)"
 else
   export ACCELERATE_MIXED_PRECISION=bf16
-  echo "precision: bf16 (ACCELERATE_MIXED_PRECISION)"
+  mode="bf16 (ACCELERATE_MIXED_PRECISION)"
 fi
+gpu=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1)
+echo "speed: workers=$workers prefetch=$prefetch precision=$mode ($cpus cpus, $gpu)"
+[ -n "$TRAIN_ARGS" ] && echo "overrides: $TRAIN_ARGS"
+# TRAIN_ARGS comes after POLICY_ARGS so user overrides win
 lerobot-train \
   "${precision[@]}" \
   --num_workers="$workers" \
+  --prefetch_factor="$prefetch" \
   --dataset.repo_id="$DATASET" \
   $POLICY_ARGS \
+  $TRAIN_ARGS \
   --policy.device=cuda \
   --policy.push_to_hub=true \
   --policy.repo_id="$REPO" \

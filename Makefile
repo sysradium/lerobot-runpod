@@ -5,13 +5,14 @@ POLICY  ?= act
 CLOUD   ?= COMMUNITY
 TRAIN_ARGS = --dataset "$(DATASET)" --policy $(POLICY) --cloud $(CLOUD) \
 	$(if $(STEPS),--steps $(STEPS)) $(if $(BATCH),--batch $(BATCH)) \
-	$(if $(MAX_HOURS),--max-hours $(MAX_HOURS)) $(if $(GPU),--gpu "$(GPU)")
+	$(if $(MAX_HOURS),--max-hours $(MAX_HOURS)) $(if $(GPU),--gpu "$(GPU)") \
+	$(if $(LEROBOT_REF),--lerobot-ref $(LEROBOT_REF))
 
 .PHONY: help
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
-	@echo "  plan/train take DATASET=<id> [POLICY=act] [CLOUD=COMMUNITY] [STEPS=] [BATCH=] [MAX_HOURS=] [GPU=]"
+	@echo "  plan/train take DATASET=<id> [POLICY=act] [CLOUD=COMMUNITY] [STEPS=] [BATCH=] [MAX_HOURS=] [GPU=] [LEROBOT_REF=]"
 
 .PHONY: sync
 sync: ## Install the dev environment
@@ -26,8 +27,8 @@ uninstall: ## Remove the uv tool
 	uv tool uninstall lerobot-runpod
 
 .PHONY: run
-run: ## Open the TUI
-	uv run lerobot-runpod
+run: ## Open the TUI (takes LEROBOT_REF=)
+	uv run lerobot-runpod $(if $(LEROBOT_REF),--lerobot-ref $(LEROBOT_REF))
 
 .PHONY: test
 test: ## Run the test suite

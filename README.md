@@ -83,6 +83,32 @@ process is already following it; `fetch` brings in a model whose pod is already 
 
 Adding one is a row in `src/lerobot_runpod/policies.py`.
 
+### Training settings
+
+The tool sets these on every run; everything else is lerobot's default.
+
+| setting | value | effect on the model |
+|---------|-------|---------------------|
+| `steps`, `batch_size` | per policy (table above), `--steps` / `--batch` | yes |
+| `save_freq` / `log_freq` | steps/5 / `--log-freq` (25) | no |
+| `num_workers` | picked on the pod: CPUs - 1, at most 12 (lerobot: 4) | no |
+| `prefetch_factor` | picked on the pod: 8 with >= 32 CPUs, else 4 | no |
+| mixed precision | bf16 when the GPU supports it (lerobot: fp32); weights stay fp32 | no |
+
+lerobot already enables cuDNN benchmark, TF32 matmuls and pinned memory on CUDA. The pod log
+prints the settings it picked as a `speed:` line before training starts.
+
+Any other `lerobot-train` setting can be passed with `--train-arg` (repeatable). It is applied
+after the policy defaults, so it takes precedence:
+
+```bash
+lerobot-runpod train --dataset local/pick_cube --policy act \
+    --train-arg policy.chunk_size=50 --train-arg policy.optimizer_lr=3e-5
+```
+
+Settings the tool manages (steps, batch size, repo, dataset, policy, ...) are refused there; use
+their own flags.
+
 ## How it integrates with LeLab
 
 - **Datasets** are read from LeLab's cache, `~/.cache/huggingface/lerobot/<owner>/<name>` (or

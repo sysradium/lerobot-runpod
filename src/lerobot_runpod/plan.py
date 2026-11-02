@@ -22,6 +22,37 @@ TOKEN_PLACEHOLDER = "<HF_TOKEN>"
 DEFAULT_LOG_FREQ = 25
 # attached pods created before CLOUD was stored in their env, when the price can't tell
 UNKNOWN_CLOUD = "UNKNOWN"
+# lerobot-train args the tool sets itself; each maps to the flag that changes it
+OWNED_TRAIN_ARGS = {
+    "steps": "--steps",
+    "batch_size": "--batch",
+    "log_freq": "--log-freq",
+    "save_freq": None,
+    "output_dir": None,
+    "dataset.repo_id": "--dataset",
+    "policy.repo_id": "--repo",
+    "policy.push_to_hub": None,
+    "policy.private": None,
+    "policy.device": None,
+    "policy.type": "--policy",
+    "policy.path": "--policy",
+}
+SPEED_SUMMARY = "workers=auto (cpus-1, max 12), prefetch=auto, bf16 if supported"
+
+
+def parse_train_args(raw: list[str] | None) -> tuple[str, ...]:
+    """Turn `key=value` overrides into lerobot-train flags, refusing the ones the tool owns."""
+    args = []
+    for item in raw or []:
+        key, sep, value = item.removeprefix("--").partition("=")
+        if not sep or not key or not value:
+            raise ValueError(f"train arg must look like key=value, got {item!r}")
+        if key in OWNED_TRAIN_ARGS:
+            flag = OWNED_TRAIN_ARGS[key]
+            hint = f"use {flag} instead" if flag else "lerobot-runpod sets it itself"
+            raise ValueError(f"cannot override {key}: {hint}")
+        args.append(f"--{key}={value}")
+    return tuple(args)
 
 
 def bootstrap_script() -> str:
@@ -79,6 +110,7 @@ class TrainPlan:
     repo: str
     lerobot_ref: str
     log_freq: int = DEFAULT_LOG_FREQ
+    extra_train_args: tuple[str, ...] = ()
     fixed_job_id: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
     deadline: int = 0
@@ -136,6 +168,7 @@ class TrainPlan:
             "BOOT": boot,
             "DATASET": self.hub_dataset,
             "POLICY_ARGS": " ".join(self.train_args),
+            "TRAIN_ARGS": " ".join(self.extra_train_args),
             "REPO": self.repo,
             "STEPS": str(self.steps),
             "BATCH": str(self.batch),
@@ -158,18 +191,23 @@ class TrainPlan:
         )
 
     def summary(self) -> list[tuple[str, str]]:
-        return [
+        rows = [
             ("dataset", self.hub_dataset),
             ("policy", self.policy.name),
             ("steps", str(self.steps)),
             ("batch", str(self.batch)),
             ("log every", f"{self.log_freq} steps"),
+            ("save every", f"{self.save_freq} steps"),
+            ("speed", SPEED_SUMMARY),
             ("lerobot", f"{self.lerobot_ref[:8]} [{self.policy.extras_spec}]"),
             ("gpu", f"{self.gpu_id} ({self.cloud})"),
             ("max time", f"{self.max_hours}h (until {self.deadline_str})"),
             ("model", f"https://huggingface.co/{self.repo} (private)"),
             ("local", str(self.job_dir)),
         ]
+        if self.extra_train_args:
+            rows.insert(7, ("overrides", " ".join(self.extra_train_args)))
+        return rows
 
 
 def default_repo(hf_user: str, policy: str, dataset_name: str, now: datetime) -> str:

@@ -154,3 +154,32 @@ def test_bootstrap_only_requests_bf16_when_supported():
     assert '"${precision[@]}"' in boot
     assert "export ACCELERATE_MIXED_PRECISION=bf16" in boot
     assert "is_bf16_supported" in boot
+
+
+def test_bootstrap_tunes_prefetch_and_applies_overrides_last():
+    boot = plan.bootstrap_script()
+    assert '--prefetch_factor="$prefetch"' in boot
+    assert boot.index("$TRAIN_ARGS \\") > boot.index("$POLICY_ARGS \\")
+
+
+def test_train_args_become_flags_in_pod_env():
+    p = make_plan(extra_train_args=plan.parse_train_args(["policy.chunk_size=50", "--seed=7"]))
+    assert p.pod_env(TOKEN)["TRAIN_ARGS"] == "--policy.chunk_size=50 --seed=7"
+    assert ("overrides", "--policy.chunk_size=50 --seed=7") in p.summary()
+
+
+def test_summary_shows_speed_and_omits_empty_overrides():
+    rows = dict(make_plan().summary())
+    assert rows["speed"] == plan.SPEED_SUMMARY
+    assert rows["save every"] == "2000 steps"
+    assert "overrides" not in rows
+    assert make_plan().pod_env(TOKEN)["TRAIN_ARGS"] == ""
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [("policy.chunk_size", "key=value"), ("=1", "key=value"), ("batch_size=64", "--batch")],
+)
+def test_parse_train_args_rejects(raw, message):
+    with pytest.raises(ValueError, match=message):
+        plan.parse_train_args([raw])

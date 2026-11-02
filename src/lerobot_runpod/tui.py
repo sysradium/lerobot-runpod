@@ -626,6 +626,7 @@ class LerobotRunpodApp(App):
             self.exit()
 
 
-def run_tui() -> None:
-    app = LerobotRunpodApp()
+def run_tui(lerobot_ref: str | None = None) -> None:
+    services = Services(lerobot_ref=lambda: plan.LerobotRef(lerobot_ref)) if lerobot_ref else None
+    app = LerobotRunpodApp(services)
     app.run()

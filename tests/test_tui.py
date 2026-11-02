@@ -243,3 +243,10 @@ def test_attach_refuses_a_pod_someone_else_follows(tmp_path, lerobot_home):
             assert not runs
 
     asyncio.run(scenario())
+
+
+def test_run_tui_pins_lerobot_ref(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(tui.LerobotRunpodApp, "run", lambda self: captured.setdefault("svc", self.services))
+    tui.run_tui("146d8474")
+    assert captured["svc"].lerobot_ref() == plan.LerobotRef("146d8474")

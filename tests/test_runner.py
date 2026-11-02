@@ -149,8 +149,14 @@ def legacy_pod(**env):
 
 
 def test_plan_from_pod_uses_stored_job_id_policy_and_cloud(lerobot_home):
-    pod = legacy_pod(JOB_ID="act_runpod_second_try_cam1_2026-10-21_22-39-17", POLICY="act", CLOUD="SECURE")
+    pod = legacy_pod(
+        JOB_ID="act_runpod_second_try_cam1_2026-10-21_22-39-17",
+        POLICY="act",
+        CLOUD="SECURE",
+        TRAIN_ARGS="--policy.chunk_size=50",
+    )
     p = runner.plan_from_pod(pod)
+    assert p.extra_train_args == ("--policy.chunk_size=50",)
     assert p.job_id == "act_runpod_second_try_cam1_2026-10-21_22-39-17"
     assert (p.policy.name, p.cloud, p.steps, p.batch, p.log_freq) == ("act", "SECURE", 30000, 32, 25)
     assert p.deadline == 1792629546 and p.repo.endswith("_2239")
@@ -164,6 +170,7 @@ def test_plan_from_legacy_pod_infers_policy_cloud_and_job_dir(lerobot_home):
     offers = [runner.runpod.GpuOffer("NVIDIA GeForce RTX 3090", 24, True, 0.46, 0.22, "Low")]
     p = runner.plan_from_pod(legacy_pod(), offers)
     assert p.policy.name == "act"
+    assert p.extra_train_args == ()
     assert p.cloud == "COMMUNITY"
     assert p.job_id == existing.name
 
