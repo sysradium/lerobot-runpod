@@ -183,3 +183,39 @@ def test_summary_shows_speed_and_omits_empty_overrides():
 def test_parse_train_args_rejects(raw, message):
     with pytest.raises(ValueError, match=message):
         plan.parse_train_args([raw])
+
+
+def test_data_options_reach_the_pod_and_the_summary():
+    off = make_plan()
+    assert (off.pod_env(TOKEN)["STREAMING"], off.pod_env(TOKEN)["IMAGE_TRANSFORMS"]) == ("false", "false")
+    assert dict(off.summary())["data"] == "downloaded to the pod, no image transforms"
+    on = make_plan(streaming=True, image_transforms=True)
+    assert (on.pod_env(TOKEN)["STREAMING"], on.pod_env(TOKEN)["IMAGE_TRANSFORMS"]) == ("true", "true")
+    assert dict(on.summary())["data"] == "streamed from the Hub, image transforms on"
+
+
+def test_bootstrap_skips_download_when_streaming_and_passes_data_flags_only_when_on():
+    boot = plan.bootstrap_script()
+    stream_branch = boot.index('if [ "$STREAMING" = true ]; then')
+    assert stream_branch < boot.index("else\n  hf download") < boot.index("fi", stream_branch)
+    assert "data+=(--dataset.streaming=true)" in boot
+    assert '[ "$IMAGE_TRANSFORMS" = true ] && data+=(--dataset.image_transforms.enable=true)' in boot
+    assert "--dataset.streaming=false" not in boot
+    assert boot.index('"${data[@]}" \\') < boot.index("$TRAIN_ARGS \\")
+
+
+@pytest.mark.parametrize(
+    ("raw", "flag"),
+    [
+        ("dataset.streaming=true", "--streaming"),
+        ("dataset.image_transforms.enable=true", "--image-transforms"),
+    ],
+)
+def test_data_options_cannot_be_overridden(raw, flag):
+    with pytest.raises(ValueError, match=flag):
+        plan.parse_train_args([raw])
+
+
+def test_image_transform_tuning_is_an_allowed_override():
+    raw = ["dataset.image_transforms.max_num_transforms=2"]
+    assert plan.parse_train_args(raw) == ("--dataset.image_transforms.max_num_transforms=2",)

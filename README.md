@@ -38,15 +38,31 @@ For development: `make sync`, then `make check` (lint + tests); `make help` list
 lerobot-runpod
 ```
 
-Setup screen: your running `lerobot-*` pods (refreshed every 30 s; **Attach** opens the run screen
-for one, e.g. after the laptop was closed), then a dataset from LeLab's cache (newest first), a
-policy, steps/batch/max hours (filled with per-policy defaults), the cloud, and a GPU (filtered by the
-policy's minimum VRAM, cheapest first). **Start** runs the pre-flight checks and shows the full plan,
-including the worst-case cost, before anything is created.
+Setup screen, four panels:
+
+1. **Running pods**: your `lerobot-*` pods, refreshed every 30 s. **Attach** opens the run screen for
+   one, e.g. after the laptop was closed.
+2. **LeLab datasets**: from LeLab's cache, newest first.
+3. **Training**: policy, steps/batch/max hours (filled with per-policy defaults), log frequency, cloud,
+   **Stream from Hub**, **Image transforms**, and extra `lerobot-train` args (`key=value ...`, same as
+   `--train-arg`). The line under the panel explains the focused field; invalid values turn red.
+4. **GPU**: filtered by the policy's minimum VRAM, in stock first, then cheapest.
+
+The line at the bottom shows the selection and its worst-case cost (`$/h × max hours`) as you move.
+**Start** runs the pre-flight checks and shows the full plan before anything is created.
+
+| key | |
+|-----|---|
+| `1`-`4` | jump to a panel (`Tab` / `Shift+Tab` move between fields) |
+| `j` `k` `g` `G` `Ctrl+d` `Ctrl+u` | move in a table |
+| `Enter` | on a pod: attach · on a dataset: go to Training · on a GPU: start |
+| `s` / `a` / `r` / `q` | start / attach / refresh / quit |
+| `Esc` | leave a text field, so the single-key bindings work again |
 
 Run screen: stage indicator (`pod > starting > install > env > download > train > done`), progress bar
-with step/ETA/it-s, the last loss line, and the scrolling pod log. `x` stops training and deletes the
-pod; `q` quits and asks whether to delete a still-running pod (default: yes).
+with step/ETA/it-s, the last loss line, and the scrolling pod log (`j`/`k`/`g`/`G`; it stops following
+new lines while you're scrolled up). `x` stops training and deletes the pod; `q` quits and asks whether
+to delete a still-running pod (default: yes).
 
 ### CLI
 
@@ -57,6 +73,9 @@ lerobot-runpod train --dry-run --dataset sysradium/second_try_cam1 --policy smol
 
 # for real; --yes skips the final confirmation, the GPU defaults to the cheapest fit
 lerobot-runpod train --dataset local/pick_cube --policy act --push-dataset --yes
+
+# stream the dataset instead of downloading it first, and augment camera frames
+lerobot-runpod train --dataset local/pick_cube --policy act --streaming --image-transforms
 
 lerobot-runpod datasets                  # LeLab datasets in the local cache
 lerobot-runpod gpus --min-vram 80        # GPUs with prices
@@ -91,12 +110,21 @@ The tool sets these on every run; everything else is lerobot's default.
 |---------|-------|---------------------|
 | `steps`, `batch_size` | per policy (table above), `--steps` / `--batch` | yes |
 | `save_freq` / `log_freq` | steps/5 / `--log-freq` (25) | no |
+| `dataset.streaming` | off; `--streaming` / "Stream from Hub" | slightly (shuffles within a buffer) |
+| `dataset.image_transforms.enable` | off; `--image-transforms` / "Image transforms" | yes |
 | `num_workers` | picked on the pod: CPUs - 1, at most 12 (lerobot: 4) | no |
 | `prefetch_factor` | picked on the pod: 8 with >= 32 CPUs, else 4 | no |
 | mixed precision | bf16 when the GPU supports it (lerobot: fp32); weights stay fp32 | no |
 
 lerobot already enables cuDNN benchmark, TF32 matmuls and pinned memory on CUDA. The pod log
 prints the settings it picked as a `speed:` line before training starts.
+
+- **Streaming** reads the dataset from the Hub while training (lerobot's `StreamingLeRobotDataset`)
+  instead of downloading it to the pod first, so training starts sooner and big datasets don't need
+  the disk. Frames are shuffled within a buffer rather than across the whole dataset.
+- **Image transforms** are lerobot's random brightness/contrast/saturation/hue/sharpness/affine
+  augmentation of camera frames, for robustness to lighting and camera placement. Tune them with
+  overrides, e.g. `--train-arg dataset.image_transforms.max_num_transforms=2`.
 
 Any other `lerobot-train` setting can be passed with `--train-arg` (repeatable). It is applied
 after the policy defaults, so it takes precedence:

@@ -161,6 +161,13 @@ def test_plan_from_pod_uses_stored_job_id_policy_and_cloud(lerobot_home):
     assert p.job_id == "act_runpod_second_try_cam1_2026-10-21_22-39-17"
     assert (p.policy.name, p.cloud, p.steps, p.batch, p.log_freq) == ("act", "SECURE", 30000, 32, 25)
     assert p.deadline == 1792629546 and p.repo.endswith("_2239")
+    assert (p.streaming, p.image_transforms) == (False, False)
+
+
+def test_plan_from_pod_keeps_data_options(lerobot_home):
+    p = runner.plan_from_pod(legacy_pod(STREAMING="true", IMAGE_TRANSFORMS="true"))
+    assert (p.streaming, p.image_transforms) == (True, True)
+    assert dict(p.summary())["data"] == "streamed from the Hub, image transforms on"
 
 
 def test_plan_from_legacy_pod_infers_policy_cloud_and_job_dir(lerobot_home):

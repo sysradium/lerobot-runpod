@@ -30,6 +30,8 @@ OWNED_TRAIN_ARGS = {
     "save_freq": None,
     "output_dir": None,
     "dataset.repo_id": "--dataset",
+    "dataset.streaming": "--streaming",
+    "dataset.image_transforms.enable": "--image-transforms",
     "policy.repo_id": "--repo",
     "policy.push_to_hub": None,
     "policy.private": None,
@@ -49,7 +51,7 @@ def parse_train_args(raw: list[str] | None) -> tuple[str, ...]:
             raise ValueError(f"train arg must look like key=value, got {item!r}")
         if key in OWNED_TRAIN_ARGS:
             flag = OWNED_TRAIN_ARGS[key]
-            hint = f"use {flag} instead" if flag else "lerobot-runpod sets it itself"
+            hint = f"it has its own setting ({flag})" if flag else "lerobot-runpod sets it itself"
             raise ValueError(f"cannot override {key}: {hint}")
         args.append(f"--{key}={value}")
     return tuple(args)
@@ -111,6 +113,10 @@ class TrainPlan:
     lerobot_ref: str
     log_freq: int = DEFAULT_LOG_FREQ
     extra_train_args: tuple[str, ...] = ()
+    # read the dataset from the Hub while training instead of downloading it to the pod first
+    streaming: bool = False
+    # lerobot's random color/sharpness/affine augmentation of camera frames
+    image_transforms: bool = False
     fixed_job_id: str | None = None
     # other GPUs up to this $/h may be used when gpu_id has no capacity; None pins gpu_id
     max_price: float | None = None
@@ -176,6 +182,8 @@ class TrainPlan:
             "BATCH": str(self.batch),
             "SAVE_FREQ": str(self.save_freq),
             "LOG_FREQ": str(self.log_freq),
+            "STREAMING": str(self.streaming).lower(),
+            "IMAGE_TRANSFORMS": str(self.image_transforms).lower(),
             # read back by `lerobot-runpod attach` to rebuild this plan from the pod
             "JOB_ID": self.job_id,
             "POLICY": self.policy.name,
@@ -196,12 +204,19 @@ class TrainPlan:
             data_center_id=data_center_id,
         )
 
+    @property
+    def data_summary(self) -> str:
+        source = "streamed from the Hub" if self.streaming else "downloaded to the pod"
+        transforms = "image transforms on" if self.image_transforms else "no image transforms"
+        return f"{source}, {transforms}"
+
     def summary(self) -> list[tuple[str, str]]:
         rows = [
             ("dataset", self.hub_dataset),
             ("policy", self.policy.name),
             ("steps", str(self.steps)),
             ("batch", str(self.batch)),
+            ("data", self.data_summary),
             ("log every", f"{self.log_freq} steps"),
             ("save every", f"{self.save_freq} steps"),
             ("speed", SPEED_SUMMARY),
@@ -213,10 +228,10 @@ class TrainPlan:
         ]
         if self.max_price is not None:
             rows.insert(
-                9, ("fallback", f"other GPUs >= {self.policy.min_vram_gb}GB up to ${self.max_price:.2f}/h")
+                10, ("fallback", f"other GPUs >= {self.policy.min_vram_gb}GB up to ${self.max_price:.2f}/h")
             )
         if self.extra_train_args:
-            rows.insert(7, ("overrides", " ".join(self.extra_train_args)))
+            rows.insert(8, ("overrides", " ".join(self.extra_train_args)))
         return rows
 
 

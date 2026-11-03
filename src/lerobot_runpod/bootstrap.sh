@@ -1,6 +1,6 @@
 # Runs inside the pod (as root), shipped base64-encoded in $BOOT. Parameters
 # arrive as env vars: HF_TOKEN DATASET POLICY_ARGS TRAIN_ARGS REPO STEPS BATCH SAVE_FREQ
-# LOG_FREQ MAX_HOURS DEADLINE FAIL_GRACE_S LEROBOT_REF EXTRAS.
+# LOG_FREQ STREAMING IMAGE_TRANSFORMS MAX_HOURS DEADLINE FAIL_GRACE_S LEROBOT_REF EXTRAS.
 # Markers (@@...@@) drive the local log follower.
 
 export HF_HUB_DISABLE_PROGRESS_BARS=1
@@ -55,8 +55,16 @@ python -c "import lerobot, torch; print('lerobot', lerobot.__version__, '| torch
   fail "cuda unavailable on this host"
 
 echo "@@STAGE download@@"
-hf download --repo-type dataset "$DATASET" --local-dir "$HF_LEROBOT_HOME/$DATASET" >/dev/null ||
-  fail "download"
+# the flags are only passed when on, so lerobot refs that predate them still work
+data=()
+if [ "$STREAMING" = true ]; then
+  data+=(--dataset.streaming=true)
+  echo "streaming $DATASET from the Hub, nothing to download"
+else
+  hf download --repo-type dataset "$DATASET" --local-dir "$HF_LEROBOT_HOME/$DATASET" >/dev/null ||
+    fail "download"
+fi
+[ "$IMAGE_TRANSFORMS" = true ] && data+=(--dataset.image_transforms.enable=true)
 
 echo "@@STAGE train@@"
 # video decoding becomes the bottleneck on fast GPUs with the default 4 workers
@@ -81,6 +89,7 @@ else
 fi
 gpu=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1)
 echo "speed: workers=$workers prefetch=$prefetch precision=$mode ($cpus cpus, $gpu)"
+[ ${#data[@]} -gt 0 ] && echo "data: ${data[*]}"
 [ -n "$TRAIN_ARGS" ] && echo "overrides: $TRAIN_ARGS"
 # TRAIN_ARGS comes after POLICY_ARGS so user overrides win
 lerobot-train \
@@ -88,6 +97,7 @@ lerobot-train \
   --num_workers="$workers" \
   --prefetch_factor="$prefetch" \
   --dataset.repo_id="$DATASET" \
+  "${data[@]}" \
   $POLICY_ARGS \
   $TRAIN_ARGS \
   --policy.device=cuda \

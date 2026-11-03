@@ -4,7 +4,7 @@ import asyncio
 import threading
 import time
 
-from textual.widgets import DataTable, Input, ProgressBar, Select, Static
+from textual.widgets import Checkbox, DataTable, Input, ProgressBar, Select, Static
 
 from lerobot_runpod import datasets, logs, plan, runner, runpod, tui
 
@@ -310,3 +310,107 @@ def test_run_tui_pins_lerobot_ref(monkeypatch):
     monkeypatch.setattr(tui.LerobotRunpodApp, "run", lambda self: captured.setdefault("svc", self.services))
     tui.run_tui("146d8474")
     assert captured["svc"].lerobot_ref() == plan.LerobotRef("146d8474")
+
+
+def summary_text(screen):
+    return str(screen.query_one("#summary", Static).render())
+
+
+def test_training_options_reach_the_plan(tmp_path, lerobot_home):
+    runs = []
+
+    async def scenario():
+        app = tui.LerobotRunpodApp(make_services(tmp_path, runs))
+        async with app.run_test(size=(140, 45)) as pilot:
+            setup = app.screen
+            await wait_for(pilot, lambda: setup.query_one("#gpus", DataTable).row_count == 3)
+            setup.query_one("#streaming", Checkbox).value = True
+            setup.query_one("#image_transforms", Checkbox).value = True
+            setup.query_one("#log_freq", Input).value = "10"
+            setup.query_one("#train_args", Input).value = "policy.chunk_size=50 seed=7"
+            await pilot.pause()
+            assert "streaming" in summary_text(setup) and "image transforms" in summary_text(setup)
+            await pilot.press("s")
+            await wait_for(pilot, lambda: isinstance(app.screen, tui.ConfirmScreen))
+            assert "streamed from the Hub, image transforms on" in app.screen.message
+            assert "--policy.chunk_size=50 --seed=7" in app.screen.message
+            await pilot.click("#yes")
+            await wait_for(pilot, lambda: runs and runs[0].delivered)
+            p = runs[0].plan
+            assert (p.streaming, p.image_transforms, p.log_freq) == (True, True, 10)
+            assert p.extra_train_args == ("--policy.chunk_size=50", "--seed=7")
+            assert "streaming" in str(app.screen.query_one("#plan", Static).render())
+
+    asyncio.run(scenario())
+
+
+def test_invalid_fields_block_start_and_show_in_summary(tmp_path, lerobot_home):
+    runs = []
+
+    async def scenario():
+        app = tui.LerobotRunpodApp(make_services(tmp_path, runs))
+        async with app.run_test(size=(140, 45)) as pilot:
+            setup = app.screen
+            await wait_for(pilot, lambda: setup.query_one("#gpus", DataTable).row_count == 3)
+            args = setup.query_one("#train_args", Input)
+            args.value = "dataset.streaming=true"
+            await pilot.pause()
+            assert "--streaming" in summary_text(setup)
+            assert not args.is_valid
+            await pilot.click("#start")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, tui.SetupScreen)
+
+            args.value = ""
+            setup.query_one("#steps", Input).value = "0"
+            await pilot.pause()
+            assert "steps must be a positive integer" in summary_text(setup)
+            assert setup.query_one("#steps", Input).has_class("-invalid")
+            await pilot.click("#start")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, tui.SetupScreen) and not runs
+
+    asyncio.run(scenario())
+
+
+def test_summary_follows_gpu_cursor_and_hours(tmp_path, lerobot_home):
+    async def scenario():
+        app = tui.LerobotRunpodApp(make_services(tmp_path, []))
+        async with app.run_test(size=(140, 45)) as pilot:
+            setup = app.screen
+            await wait_for(pilot, lambda: setup.query_one("#gpus", DataTable).row_count == 3)
+            assert "$0.22/h × 4h = up to $0.88" in summary_text(setup)
+            await pilot.press("4", "j")
+            assert "NVIDIA RTX A6000" in summary_text(setup)
+            setup.query_one("#max_hours", Input).value = "10"
+            await pilot.pause()
+            assert "$0.33/h × 10h = up to $3.30" in summary_text(setup)
+
+    asyncio.run(scenario())
+
+
+def test_vim_keys_and_enter_on_a_gpu_starts(tmp_path, lerobot_home):
+    async def scenario():
+        app = tui.LerobotRunpodApp(make_services(tmp_path, []))
+        async with app.run_test(size=(140, 45)) as pilot:
+            setup = app.screen
+            gpus = setup.query_one("#gpus", DataTable)
+            await wait_for(pilot, lambda: gpus.row_count == 3)
+            await pilot.press("4", "G")
+            assert (setup.focused, gpus.cursor_row) == (gpus, 2)
+            await pilot.press("k", "g")
+            assert gpus.cursor_row == 0
+
+            await pilot.press("3")
+            assert setup.focused.id == "policy"
+            setup.query_one("#steps", Input).focus()
+            await pilot.press("s")
+            assert isinstance(app.screen, tui.SetupScreen)
+            await pilot.press("escape")
+            assert setup.focused is gpus
+
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: isinstance(app.screen, tui.ConfirmScreen))
+            assert "NVIDIA GeForce RTX 3090" in app.screen.message
+
+    asyncio.run(scenario())

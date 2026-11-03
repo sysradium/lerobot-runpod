@@ -10,13 +10,15 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from rich.text import Text
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
+from textual.validation import Integer, ValidationResult, Validator
 from textual.widgets import (
     Button,
+    Checkbox,
     DataTable,
     Footer,
     Header,
@@ -32,6 +34,71 @@ from . import datasets, hf, logs, plan, policies, runner, runpod
 from .config import CAPACITY_POLL_S, FALLBACK_PRICE_FACTOR, find_lerobot_src
 
 STAGES = ("pod", "starting", "install", "env", "download", "train", "done")
+# shown under the Training panel while that field has focus
+FIELD_HELP = {
+    "steps": "optimizer steps: more steps train longer and cost more",
+    "batch": "samples per step: lower it if the GPU runs out of memory",
+    "max_hours": "hard limit: the pod deletes itself after this, even if this machine is gone",
+    "log_freq": "print a loss line every N steps",
+    "cloud": "COMMUNITY is roughly half the price of SECURE, but its hosts are less reliable",
+    "streaming": "read the dataset from the Hub while training instead of downloading it to the pod "
+    "first: no download wait or disk use, frames are shuffled within a buffer",
+    "image_transforms": "random brightness/contrast/saturation/hue/sharpness/affine on camera frames, "
+    "for robustness to lighting and camera placement",
+    "train_args": "extra lerobot-train settings, space separated, e.g. policy.chunk_size=50 or "
+    "dataset.image_transforms.max_num_transforms=2",
+}
+PANELS = {"1": "#pods", "2": "#datasets", "3": "#policy", "4": "#gpus"}
+
+
+class VimTable(DataTable):
+    BINDINGS = [
+        Binding("j", "cursor_down", show=False),
+        Binding("k", "cursor_up", show=False),
+        Binding("g", "scroll_top", show=False),
+        Binding("G", "scroll_bottom", show=False),
+        Binding("ctrl+d", "page_down", show=False),
+        Binding("ctrl+u", "page_up", show=False),
+    ]
+
+
+class VimLog(RichLog):
+    BINDINGS = [
+        Binding("j", "scroll_down", show=False),
+        Binding("k", "scroll_up", show=False),
+        Binding("g", "scroll_home", show=False),
+        Binding("G", "scroll_end", show=False),
+        Binding("ctrl+d", "page_down", show=False),
+        Binding("ctrl+u", "page_up", show=False),
+    ]
+
+
+class TrainArgs(Validator):
+    def validate(self, value: str) -> ValidationResult:
+        try:
+            plan.parse_train_args(value.split())
+        except ValueError as exc:
+            return self.failure(str(exc))
+        return self.success()
+
+
+@dataclass(frozen=True)
+class SetupForm:
+    dataset: datasets.LocalDataset
+    gpu: runpod.GpuOffer
+    policy: policies.Policy
+    cloud: str
+    steps: int
+    batch: int
+    max_hours: int
+    log_freq: int
+    streaming: bool
+    image_transforms: bool
+    extra_train_args: tuple[str, ...]
+
+    @property
+    def price(self) -> float | None:
+        return self.gpu.price(self.cloud)
 
 
 @dataclass
@@ -113,19 +180,38 @@ class ConfirmScreen(ModalScreen[bool]):
 
 
 class SetupScreen(Screen):
-    BINDINGS = [Binding("r", "refresh", "Refresh"), Binding("q", "app.quit", "Quit")]
+    BINDINGS = [
+        Binding("s", "start", "Start"),
+        Binding("a", "attach", "Attach"),
+        Binding("r", "refresh", "Refresh"),
+        Binding("q", "app.quit", "Quit"),
+        Binding("escape", "leave_field", show=False),
+        *(Binding(key, f"focus_panel('{key}')", show=False) for key in PANELS),
+    ]
     DEFAULT_CSS = """
     SetupScreen { layout: vertical; padding: 0 1; }
-    SetupScreen .title { margin-top: 1; text-style: bold; }
-    #pods { height: auto; max-height: 5; }
-    #datasets { height: 1fr; min-height: 4; }
-    #gpus { height: 1fr; min-height: 4; }
-    #params { height: auto; margin-top: 1; }
-    #params > Vertical { width: 1fr; height: auto; margin-right: 1; }
-    #params Input, #params Select { width: 100%; }
-    #policy-hint { color: $text-muted; }
-    #bottom { height: auto; margin: 1 0; }
-    #status { width: 1fr; padding-top: 1; }
+    SetupScreen VimTable, #training {
+        border: round $panel; border-title-color: $text-muted; background: $surface;
+    }
+    SetupScreen VimTable:focus, #training:focus-within {
+        border: round $accent; border-title-color: $accent; border-title-style: bold;
+    }
+    #pods { height: auto; max-height: 7; }
+    #datasets { height: 1fr; min-height: 6; }
+    #gpus { height: 1fr; min-height: 6; }
+    #training { height: auto; padding: 0 1; }
+    #training Horizontal { height: auto; }
+    #training Horizontal > Vertical { width: 1fr; height: auto; margin-right: 1; }
+    #training Input, #training Select { width: 100%; }
+    #training Label { color: $text-muted; }
+    #data-field { width: 2fr; }
+    #train-args-field { width: 3fr; }
+    #hint { color: $text-muted; padding: 0 1; }
+    #bottom { height: auto; margin-bottom: 1; }
+    #bottom > Vertical { width: 1fr; height: auto; }
+    #summary { text-style: bold; }
+    #status { color: $text-muted; }
+    #bottom Button { margin-left: 1; }
     """
 
     def __init__(self, services: Services):
@@ -137,42 +223,61 @@ class SetupScreen(Screen):
         self.pod_rows: list[dict[str, Any]] = []
 
     def compose(self) -> ComposeResult:
+        positive = [Integer(minimum=1, failure_description="must be a positive integer")]
         yield Header()
-        yield Label("Running pods", id="pods-title", classes="title")
-        yield DataTable(id="pods", cursor_type="row", zebra_stripes=True)
-        yield Label("LeLab datasets (newest first)", classes="title")
-        yield DataTable(id="datasets", cursor_type="row", zebra_stripes=True)
-        with Horizontal(id="params"):
-            with Vertical():
-                yield Label("Policy")
-                yield Select(
-                    [(p.name, p.name) for p in policies.POLICIES.values()],
-                    value="act",
-                    allow_blank=False,
-                    id="policy",
-                )
-            with Vertical():
-                yield Label("Steps")
-                yield Input(id="steps", type="integer")
-            with Vertical():
-                yield Label("Batch")
-                yield Input(id="batch", type="integer")
-            with Vertical():
-                yield Label("Max hours")
-                yield Input(id="max_hours", type="integer")
-            with Vertical():
-                yield Label("Cloud")
-                yield Select(
-                    [("COMMUNITY", "COMMUNITY"), ("SECURE", "SECURE")],
-                    value="COMMUNITY",
-                    allow_blank=False,
-                    id="cloud",
-                )
-        yield Static("", id="policy-hint")
-        yield Label("GPU", id="gpu-title", classes="title")
-        yield DataTable(id="gpus", cursor_type="row", zebra_stripes=True)
+        yield VimTable(id="pods", cursor_type="row", zebra_stripes=True)
+        yield VimTable(id="datasets", cursor_type="row", zebra_stripes=True)
+        with Vertical(id="training"):
+            with Horizontal():
+                with Vertical():
+                    yield Label("Policy")
+                    yield Select(
+                        [(p.name, p.name) for p in policies.POLICIES.values()],
+                        value="act",
+                        allow_blank=False,
+                        id="policy",
+                    )
+                with Vertical():
+                    yield Label("Steps")
+                    yield Input(id="steps", type="integer", validators=positive)
+                with Vertical():
+                    yield Label("Batch")
+                    yield Input(id="batch", type="integer", validators=positive)
+                with Vertical():
+                    yield Label("Max hours")
+                    yield Input(id="max_hours", type="integer", validators=positive)
+                with Vertical():
+                    yield Label("Log every")
+                    yield Input(
+                        str(plan.DEFAULT_LOG_FREQ), id="log_freq", type="integer", validators=positive
+                    )
+                with Vertical():
+                    yield Label("Cloud")
+                    yield Select(
+                        [("COMMUNITY", "COMMUNITY"), ("SECURE", "SECURE")],
+                        value="COMMUNITY",
+                        allow_blank=False,
+                        id="cloud",
+                    )
+            with Horizontal():
+                with Vertical(id="data-field"):
+                    yield Label("Data")
+                    with Horizontal():
+                        yield Checkbox("Stream from Hub", id="streaming")
+                        yield Checkbox("Image transforms", id="image_transforms")
+                with Vertical(id="train-args-field"):
+                    yield Label("Extra lerobot-train args")
+                    yield Input(
+                        placeholder="policy.chunk_size=50 policy.optimizer_lr=3e-5",
+                        id="train_args",
+                        validators=[TrainArgs()],
+                    )
+            yield Static("", id="hint")
+        yield VimTable(id="gpus", cursor_type="row", zebra_stripes=True)
         with Horizontal(id="bottom"):
-            yield Static("", id="status")
+            with Vertical():
+                yield Static("", id="summary")
+                yield Static("", id="status")
             yield Button("Attach", id="attach")
             yield Button("Start", id="start", variant="success")
         yield Footer()
@@ -181,11 +286,14 @@ class SetupScreen(Screen):
         self.query_one("#datasets", DataTable).add_columns("modified", "dataset", "episodes", "frames", "fps")
         self.query_one("#gpus", DataTable).add_columns("price", "vram", "stock", "gpu", "in stock at")
         self.query_one("#pods", DataTable).add_columns("pod", "name", "gpu", "price", "status")
+        self.query_one("#training").border_title = "[3] Training"
+        self.query_one("#datasets").border_title = "[2] LeLab datasets · newest first · Enter to configure"
         self._apply_policy_defaults()
         self.load_datasets()
         self.load_gpus()
         self.load_pods()
         self.set_interval(30, self.load_pods)
+        self.query_one("#datasets").focus()
 
     @property
     def policy(self) -> policies.Policy:
@@ -203,13 +311,81 @@ class SetupScreen(Screen):
         self.query_one("#steps", Input).value = str(p.steps)
         self.query_one("#batch", Input).value = str(p.batch)
         self.query_one("#max_hours", Input).value = str(p.max_hours)
-        self.query_one("#policy-hint", Static).update(
-            f"{p.name}: {p.description}. COMMUNITY cloud is cheaper but less reliable."
+        self._update_hint()
+
+    def _update_hint(self) -> None:
+        focused = self.focused.id if self.focused else None
+        if focused in FIELD_HELP:
+            text = FIELD_HELP[focused]
+        else:
+            p = self.policy
+            text = (
+                f"{p.name}: {p.description}  ·  Tab next field · 1-4 panels · Esc leave field · "
+                "j/k/g/G in tables"
+            )
+        self.query_one("#hint", Static).update(text)
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        self._update_hint()
+
+    def _read_form(self) -> SetupForm:
+        """Everything Start needs, or a ValueError naming the first problem."""
+        if not self.dataset_rows:
+            raise ValueError("no dataset selected")
+        if not self.gpu_rows:
+            raise ValueError("no GPU for this policy/cloud" if self.offers else "loading GPUs...")
+        values = {}
+        for field in ("steps", "batch", "max_hours", "log_freq"):
+            raw = self.query_one(f"#{field}", Input).value.strip()
+            if not raw.isdigit() or int(raw) <= 0:
+                raise ValueError(f"{field.replace('_', ' ')} must be a positive integer")
+            values[field] = int(raw)
+        extra = plan.parse_train_args(self.query_one("#train_args", Input).value.split())
+        return SetupForm(
+            dataset=self.dataset_rows[self.query_one("#datasets", DataTable).cursor_row],
+            gpu=self.gpu_rows[self.query_one("#gpus", DataTable).cursor_row],
+            policy=self.policy,
+            cloud=self.cloud,
+            streaming=self.query_one("#streaming", Checkbox).value,
+            image_transforms=self.query_one("#image_transforms", Checkbox).value,
+            extra_train_args=extra,
+            **values,
         )
+
+    def _update_summary(self) -> None:
+        summary = self.query_one("#summary", Static)
+        try:
+            form = self._read_form()
+        except ValueError as exc:
+            summary.update(Text(str(exc), style="yellow"))
+            return
+        parts = [form.dataset.repo_id, form.policy.name, f"{form.steps} steps", form.gpu.gpu_id]
+        if form.price is not None:
+            parts.append(
+                f"${form.price:.2f}/h × {form.max_hours}h = up to ${form.price * form.max_hours:.2f}"
+            )
+        if form.streaming:
+            parts.append("streaming")
+        if form.image_transforms:
+            parts.append("image transforms")
+        summary.update(" · ".join(parts))
+
+    @on(DataTable.RowHighlighted, "#datasets")
+    @on(DataTable.RowHighlighted, "#gpus")
+    @on(Input.Changed)
+    @on(Checkbox.Changed)
+    def form_changed(self) -> None:
+        self._update_summary()
 
     def action_refresh(self) -> None:
         self.load_datasets()
         self.load_gpus()
+
+    def action_focus_panel(self, key: str) -> None:
+        self.query_one(PANELS[key]).focus()
+
+    def action_leave_field(self) -> None:
+        self.query_one("#gpus").focus()
 
     @work(exclusive=True, group="datasets")
     async def load_datasets(self) -> None:
@@ -221,16 +397,17 @@ class SetupScreen(Screen):
             table.add_row(d.modified, d.repo_id, str(d.episodes), str(d.frames), str(d.fps))
         if not found:
             self.set_status("no LeLab datasets found; record one in LeLab first")
+        self._update_summary()
 
     @work(exclusive=True, group="pods")
     async def load_pods(self) -> None:
+        table = self.query_one("#pods", DataTable)
         try:
             pods = await asyncio.to_thread(self.services.list_pods)
         except Exception as exc:
-            self.query_one("#pods-title", Label).update(f"Running pods (could not list: {exc})")
+            table.border_title = f"[1] Running pods · could not list: {exc}"
             return
         self.pod_rows = pods
-        table = self.query_one("#pods", DataTable)
         table.clear()
         for p in pods:
             price = p.get("costPerHr")
@@ -241,19 +418,27 @@ class SetupScreen(Screen):
                 f"${price:.2f}/h" if isinstance(price, int | float) else "-",
                 str(p.get("desiredStatus") or "-"),
             )
-        self.query_one("#pods-title", Label).update(
-            f"Running pods ({len(pods)}) — select one and press Attach to follow it"
+        table.border_title = (
+            f"[1] Running pods ({len(pods)}) · Enter or a to attach and follow one"
             if pods
-            else "Running pods (none)"
+            else "[1] Running pods (none)"
         )
 
-    @on(Button.Pressed, "#attach")
-    def attach_pressed(self) -> None:
+    @on(DataTable.RowSelected, "#pods")
+    def action_attach(self) -> None:
         if not self.pod_rows:
             self.notify("no running lerobot-* pods", severity="warning")
             return
         pod = self.pod_rows[self.query_one("#pods", DataTable).cursor_row]
         self.attach(str(pod.get("id")))
+
+    @on(Button.Pressed, "#attach")
+    def attach_pressed(self) -> None:
+        self.action_attach()
+
+    @on(DataTable.RowSelected, "#datasets")
+    def dataset_selected(self) -> None:
+        self.query_one("#policy").focus()
 
     @work(exclusive=True, group="start")
     async def attach(self, pod_id: str) -> None:
@@ -300,9 +485,10 @@ class SetupScreen(Screen):
                 o.gpu_id if o.available else Text(o.gpu_id, style="dim"),
                 ", ".join(o.data_centers),
             )
-        self.query_one("#gpu-title", Label).update(
-            f"GPU (>= {p.min_vram_gb}GB, {cloud}, in stock first, then cheapest)"
+        table.border_title = (
+            f"[4] GPU · >= {p.min_vram_gb}GB, {cloud}, in stock first, then cheapest · Enter or s to start"
         )
+        self._update_summary()
 
     @on(Select.Changed, "#policy")
     def policy_changed(self) -> None:
@@ -313,35 +499,22 @@ class SetupScreen(Screen):
     def cloud_changed(self) -> None:
         self.load_gpus()
 
-    def _int(self, widget_id: str) -> int:
-        raw = self.query_one(f"#{widget_id}", Input).value.strip()
-        if not raw.isdigit() or int(raw) <= 0:
-            raise ValueError(f"{widget_id.replace('_', ' ')} must be a positive integer")
-        return int(raw)
-
+    @on(DataTable.RowSelected, "#gpus")
     @on(Button.Pressed, "#start")
-    def start_pressed(self) -> None:
-        ds_table, gpu_table = self.query_one("#datasets", DataTable), self.query_one("#gpus", DataTable)
-        if not self.dataset_rows:
-            self.notify("no dataset selected", severity="error")
-            return
-        if not self.gpu_rows:
-            self.notify("RunPod sells no GPU for this policy/cloud", severity="error")
+    def action_start(self) -> None:
+        if self.query_one("#start", Button).disabled:
             return
         try:
-            steps, batch, max_hours = self._int("steps"), self._int("batch"), self._int("max_hours")
+            form = self._read_form()
         except ValueError as exc:
             self.notify(str(exc), severity="error")
             return
-        dataset = self.dataset_rows[ds_table.cursor_row]
-        gpu = self.gpu_rows[gpu_table.cursor_row]
-        self.prepare_and_start(dataset.repo_id, self.policy, steps, batch, max_hours, gpu.gpu_id)
+        self.prepare_and_start(form)
 
     @work(exclusive=True, group="start")
-    async def prepare_and_start(
-        self, dataset: str, policy: policies.Policy, steps: int, batch: int, max_hours: int, gpu_id: str
-    ) -> None:
+    async def prepare_and_start(self, form: SetupForm) -> None:
         svc = self.services
+        dataset, policy = form.dataset.repo_id, form.policy
         button = self.query_one("#start", Button)
         button.disabled = True
         try:
@@ -386,26 +559,30 @@ class SetupScreen(Screen):
                 await asyncio.to_thread(svc.check_cameras, policy, status)
             self.set_status("resolving lerobot version...")
             ref = await asyncio.to_thread(svc.lerobot_ref)
-            price = next((o.price(self.cloud) for o in self.gpu_rows if o.gpu_id == gpu_id), None)
+            price = form.price
             max_price = price * FALLBACK_PRICE_FACTOR if price is not None else None
             train_plan = runner.build_plan(
                 dataset=dataset,
                 hub_dataset=status.hub_dataset,
                 policy=policy,
-                gpu_id=gpu_id,
-                cloud=self.cloud,
+                gpu_id=form.gpu.gpu_id,
+                cloud=form.cloud,
                 hf_user=user,
-                steps=steps,
-                batch=batch,
-                max_hours=max_hours,
+                steps=form.steps,
+                batch=form.batch,
+                max_hours=form.max_hours,
+                log_freq=form.log_freq,
+                extra_train_args=form.extra_train_args,
+                streaming=form.streaming,
+                image_transforms=form.image_transforms,
                 lerobot_ref=ref.ref,
                 max_price=max_price,
             )
             lines = [f"{k:<10} {v}" for k, v in train_plan.summary()]
             if price is not None and max_price is not None:
                 lines.append(
-                    f"{'cost':<10} ${price:.2f}/h, at most ~${price * max_hours:.2f} "
-                    f"(~${max_price * max_hours:.2f} on a fallback GPU)"
+                    f"{'cost':<10} ${price:.2f}/h, at most ~${price * form.max_hours:.2f} "
+                    f"(~${max_price * form.max_hours:.2f} on a fallback GPU)"
                 )
             if ref.warning:
                 lines.append(f"\nnote: {ref.warning}")
@@ -437,6 +614,7 @@ class RunScreen(Screen):
     #stats { width: auto; margin-left: 2; }
     #loss { margin-top: 1; }
     #log { height: 1fr; margin-top: 1; border: round $panel; }
+    #log:focus { border: round $accent; }
     """
 
     def __init__(
@@ -460,25 +638,35 @@ class RunScreen(Screen):
             yield ProgressBar(total=p.steps, show_eta=False, id="progress")
             yield Static("", id="stats")
         yield Static("loss: -", id="loss")
-        yield RichLog(id="log", max_lines=5000, markup=False, wrap=False)
+        yield VimLog(id="log", max_lines=5000, markup=False, wrap=False)
         yield Footer()
 
     def _plan_text(self) -> str:
         p = self.training.plan
-        return (
-            f"{p.policy.name} on {p.hub_dataset} · {p.steps} steps · {p.gpu_id} ({p.cloud}) · "
-            f"max {p.max_hours}h"
-        )
+        parts = [
+            f"{p.policy.name} on {p.hub_dataset}",
+            f"{p.steps} steps",
+            f"{p.gpu_id} ({p.cloud})",
+            f"max {p.max_hours}h",
+        ]
+        if p.streaming:
+            parts.append("streaming")
+        if p.image_transforms:
+            parts.append("image transforms")
+        return " · ".join(parts)
 
     def on_mount(self) -> None:
         self._render_stages()
+        self.query_one("#log").focus()
         self.drive()
 
     def _emit(self, event: runner.RunEvent) -> None:
         self.app.call_from_thread(self.handle_event, event)
 
     def log_line(self, text: str | Text) -> None:
-        self.query_one("#log", RichLog).write(text)
+        log = self.query_one("#log", RichLog)
+        # don't yank the view back down while someone scrolled up to read
+        log.write(text, scroll_end=log.is_vertical_scroll_end)
 
     def _render_stages(self) -> None:
         parts = []

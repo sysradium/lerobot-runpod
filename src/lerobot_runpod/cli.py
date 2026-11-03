@@ -85,6 +85,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"print a loss line every N steps (default: {plan.DEFAULT_LOG_FREQ})",
     )
     train.add_argument(
+        "--streaming",
+        action="store_true",
+        help="stream the dataset from the Hub while training instead of downloading it to the pod first",
+    )
+    train.add_argument(
+        "--image-transforms",
+        action="store_true",
+        help="random brightness/contrast/saturation/hue/sharpness/affine augmentation of camera frames; "
+        "tune with --train-arg dataset.image_transforms.max_num_transforms=N",
+    )
+    train.add_argument(
         "--train-arg",
         action="append",
         metavar="KEY=VALUE",
@@ -292,6 +303,8 @@ def prepare(args: argparse.Namespace) -> tuple[plan.TrainPlan, str]:
         max_hours=args.max_hours,
         log_freq=args.log_freq,
         extra_train_args=extra_train_args,
+        streaming=args.streaming,
+        image_transforms=args.image_transforms,
         repo=args.repo,
         lerobot_ref=ref.ref,
         max_price=fallback_price(offers, gpu, args.cloud, args.max_price),
