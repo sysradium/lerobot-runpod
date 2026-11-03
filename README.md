@@ -11,8 +11,8 @@ LeLab dataset ──> (Hub, private) ──> RunPod pod: lerobot-train ──> m
 LeLab "Training" list <── ~/.cache/huggingface/lerobot/outputs/train <───┘ hf download
 ```
 
-It shells out to the `runpodctl` and `hf` CLIs (no API reimplementation), has a small Textual TUI,
-and a scriptable CLI that uses the same code.
+It shells out to the `runpodctl` and `hf` CLIs, plus RunPod's v2 catalog API for GPU availability,
+and has a small Textual TUI and a scriptable CLI that uses the same code.
 
 ## Requirements
 
@@ -156,8 +156,17 @@ their own flags.
   inference. The tool checks this before creating a pod. Fix it with
   `lerobot-runpod rename-camera <dataset> <old> camera1` and rename the camera in LeLab's robot setup
   to match.
-- **"There are no longer any instances available".** `runpodctl gpu list` saying `available` doesn't
-  guarantee capacity. Pick another GPU or switch cloud; the TUI drops you back to the setup screen.
+- **"There are no longer any instances available".** GPU stock comes from RunPod's
+  [catalog API](https://docs.runpod.io/api-reference-v2/catalog/list-gpu-types), asked for the
+  selected cloud and the CUDA version pods need (`runpodctl gpu list` ignores both and lists GPUs that
+  can't be placed). Stock is only a hint, so pod creation tries every data center that has the GPU,
+  then other GPUs that fit up to 2x its price (`--max-price` changes the cap, `0` pins the GPU), and
+  says when it used one. If nothing places, the TUI offers to keep checking every 60s; on the CLI pass
+  `--wait`.
+- **`HfHubHTTPError.__init__() missing ... 'response'`** while "Creating dataset". The Hub dataset has
+  no codebase-version tag (e.g. `v3.0`), which lerobot loads datasets at. Only lerobot's `push_to_hub`
+  creates it, not a plain folder upload. The tool checks for it before creating a pod and offers to
+  add it.
 - **Slow first start.** On a fresh host the image pull can take minutes; the platform log is shown
   until the container starts.
 - The image is `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404`: pre-cached on RunPod hosts and runs

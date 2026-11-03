@@ -6,7 +6,7 @@ import sys
 from types import FrameType
 
 from . import __version__, cameras, datasets, deliver, hf, logs, plan, policies, runner, runpod
-from .config import find_lerobot_src, lerobot_home
+from .config import CAPACITY_POLL_S, FALLBACK_PRICE_FACTOR, find_lerobot_src, lerobot_home
 from .shell import missing_binaries
 
 TTY = sys.stdout.isatty()
@@ -95,10 +95,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="lerobot git ref to train with (default: the one bundled with LeLab, else the local checkout)",
     )
     train.add_argument("--cloud", default="COMMUNITY", type=str.upper, choices=runpod.CLOUDS)
-    train.add_argument("--gpu", help='RunPod gpu id, e.g. "NVIDIA GeForce RTX 4090" (default: cheapest fit)')
+    train.add_argument(
+        "--gpu", help='RunPod gpu id, e.g. "NVIDIA GeForce RTX 4090" (default: cheapest in-stock fit)'
+    )
+    train.add_argument(
+        "--max-price",
+        type=float,
+        metavar="USD",
+        help="if the GPU has no capacity, try other fitting GPUs up to this $/h "
+        f"(default: {FALLBACK_PRICE_FACTOR:g}x its price; 0 disables)",
+    )
+    train.add_argument(
+        "--wait",
+        action="store_true",
+        help=f"if no GPU has capacity, check again every {CAPACITY_POLL_S}s until one does",
+    )
     train.add_argument("--repo", help="model repo to push to (default <hf_user>/<policy>_<dataset>_<ts>)")
     train.add_argument(
-        "--push-dataset", action="store_true", help="push a local-only dataset to the Hub (private)"
+        "--push-dataset",
+        action="store_true",
+        help="push a local-only dataset to the Hub (private), or add the version tag lerobot needs",
     )
     train.add_argument("--yes", "-y", action="store_true", help="skip the final confirmation")
     train.add_argument(
@@ -150,8 +166,11 @@ def cmd_datasets(_: argparse.Namespace) -> int:
 
 
 def cmd_gpus(args: argparse.Namespace) -> int:
-    for o in runpod.filter_offers(runpod.list_gpus(), args.min_vram, args.cloud):
-        print(f"${o.price(args.cloud):<6.2f}/h  {o.memory_gb:>3}GB  {o.stock or '-':<7} {o.gpu_id}")
+    for o in runpod.filter_offers(runpod.list_gpus(args.cloud), args.min_vram, args.cloud):
+        print(
+            f"${o.price(args.cloud):<6.2f}/h  {o.memory_gb:>3}GB  {(o.stock or '-').lower():<6} "
+            f"{o.gpu_id:<56} {','.join(o.data_centers)}"
+        )
     return 0
 
 
@@ -188,13 +207,26 @@ def cmd_rename(args: argparse.Namespace) -> int:
     return 0
 
 
-def pick_gpu(policy: policies.Policy, cloud: str) -> str:
-    offers = runpod.filter_offers(runpod.list_gpus(), policy.min_vram_gb, cloud)
-    if not offers:
-        raise Abort(f"no {cloud} GPU with >= {policy.min_vram_gb}GB available")
-    cheapest = offers[0]
-    info(f"cheapest fit: {cheapest.gpu_id} ({cheapest.memory_gb}GB) at ${cheapest.price(cloud):.2f}/h")
+def pick_gpu(offers: list[runpod.GpuOffer], policy: policies.Policy, cloud: str, wait: bool) -> str:
+    """The cheapest in-stock fit, or with wait and nothing in stock, the cheapest fit to wait for."""
+    fits = runpod.filter_offers(offers, policy.min_vram_gb, cloud)
+    if not fits:
+        raise Abort(f"RunPod sells no {cloud} GPU with >= {policy.min_vram_gb}GB")
+    cheapest = fits[0]
+    if not cheapest.available and not wait:
+        raise Abort(f"no {cloud} GPU with >= {policy.min_vram_gb}GB in stock (pass --wait to wait for one)")
+    stock = "" if cheapest.available else ", none in stock yet"
+    info(f"cheapest fit: {cheapest.gpu_id} ({cheapest.memory_gb}GB) at ${cheapest.price(cloud):.2f}/h{stock}")
     return cheapest.gpu_id
+
+
+def fallback_price(
+    offers: list[runpod.GpuOffer], gpu_id: str, cloud: str, max_price: float | None
+) -> float | None:
+    if max_price is not None:
+        return max_price or None
+    price = next((o.price(cloud) for o in offers if o.gpu_id == gpu_id), None)
+    return price * FALLBACK_PRICE_FACTOR if price is not None else None
 
 
 def prepare(args: argparse.Namespace) -> tuple[plan.TrainPlan, str]:
@@ -223,6 +255,16 @@ def prepare(args: argparse.Namespace) -> tuple[plan.TrainPlan, str]:
         else:
             raise Abort("the dataset must be on the Hub for the pod to use it (pass --push-dataset)")
 
+    if tag := status.missing_tag:
+        warn(f"{status.hub_dataset} has no {tag} tag, which lerobot needs to load it from the Hub")
+        if args.dry_run:
+            info(f"dry run: would tag {status.hub_dataset} with {tag}")
+        elif args.push_dataset or confirm(f"Tag {status.hub_dataset} with {tag}?", default=True):
+            hf.tag_dataset(status.hub_dataset, tag)
+            info(f"tagged {status.hub_dataset} with {tag}")
+        else:
+            raise Abort(f"training would crash without the {tag} tag (pass --push-dataset to add it)")
+
     if policy.base_model:
         check = runner.check_cameras(policy, status)
         info(f"cameras match {policy.base_model}: {', '.join(check.dataset) if check else '-'}")
@@ -236,7 +278,8 @@ def prepare(args: argparse.Namespace) -> tuple[plan.TrainPlan, str]:
     if ref.warning:
         warn(ref.warning)
 
-    gpu = args.gpu or pick_gpu(policy, args.cloud)
+    offers = runpod.list_gpus(args.cloud)
+    gpu = args.gpu or pick_gpu(offers, policy, args.cloud, args.wait)
     train_plan = runner.build_plan(
         dataset=args.dataset,
         hub_dataset=status.hub_dataset,
@@ -251,6 +294,7 @@ def prepare(args: argparse.Namespace) -> tuple[plan.TrainPlan, str]:
         extra_train_args=extra_train_args,
         repo=args.repo,
         lerobot_ref=ref.ref,
+        max_price=fallback_price(offers, gpu, args.cloud, args.max_price),
     )
     return train_plan, token
 
@@ -308,9 +352,10 @@ def cmd_train(args: argparse.Namespace) -> int:
 
     run = runner.TrainingRun(train_plan, token, ConsolePrinter())
     try:
-        run.create_pod()
+        run.create_pod(wait=args.wait)
     except runpod.CapacityError as exc:
-        raise Abort(f"{exc}\n   see: lerobot-runpod gpus --cloud {train_plan.cloud}") from exc
+        hint = "" if args.wait else "; pass --wait to keep trying"
+        raise Abort(f"{exc}{hint}\n   see: lerobot-runpod gpus --cloud {train_plan.cloud}") from exc
     return follow_and_deliver(run, args.yes)
 
 
@@ -324,7 +369,8 @@ def cmd_attach(args: argparse.Namespace) -> int:
         pod_id = str(own[0]["id"])
     pod = runpod.get_pod(pod_id)
     try:
-        offers = runpod.list_gpus()
+        # only the prices are used, and the catalog returns both clouds' prices either way
+        offers = runpod.list_gpus("SECURE")
     except Exception:
         offers = []
     train_plan = runner.plan_from_pod(pod, offers)

@@ -112,6 +112,8 @@ class TrainPlan:
     log_freq: int = DEFAULT_LOG_FREQ
     extra_train_args: tuple[str, ...] = ()
     fixed_job_id: str | None = None
+    # other GPUs up to this $/h may be used when gpu_id has no capacity; None pins gpu_id
+    max_price: float | None = None
     created_at: datetime = field(default_factory=datetime.now)
     deadline: int = 0
 
@@ -185,9 +187,13 @@ class TrainPlan:
             "FAIL_GRACE_S": str(FAIL_GRACE_S),
         }
 
-    def pod_command(self, hf_token: str) -> list[str]:
+    def pod_command(self, hf_token: str, data_center_id: str | None = None) -> list[str]:
         return runpod.create_command(
-            name=self.pod_name, gpu_id=self.gpu_id, cloud=self.cloud, env=self.pod_env(hf_token)
+            name=self.pod_name,
+            gpu_id=self.gpu_id,
+            cloud=self.cloud,
+            env=self.pod_env(hf_token),
+            data_center_id=data_center_id,
         )
 
     def summary(self) -> list[tuple[str, str]]:
@@ -205,6 +211,10 @@ class TrainPlan:
             ("model", f"https://huggingface.co/{self.repo} (private)"),
             ("local", str(self.job_dir)),
         ]
+        if self.max_price is not None:
+            rows.insert(
+                9, ("fallback", f"other GPUs >= {self.policy.min_vram_gb}GB up to ${self.max_price:.2f}/h")
+            )
         if self.extra_train_args:
             rows.insert(7, ("overrides", " ".join(self.extra_train_args)))
         return rows

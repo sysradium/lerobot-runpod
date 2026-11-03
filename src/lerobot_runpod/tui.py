@@ -29,7 +29,7 @@ from textual.widgets import (
 )
 
 from . import datasets, hf, logs, plan, policies, runner, runpod
-from .config import find_lerobot_src
+from .config import CAPACITY_POLL_S, FALLBACK_PRICE_FACTOR, find_lerobot_src
 
 STAGES = ("pod", "starting", "install", "env", "download", "train", "done")
 
@@ -39,10 +39,11 @@ class Services:
     """Everything the TUI does to the outside world, swappable in tests."""
 
     discover: Callable[[], list[datasets.LocalDataset]] = datasets.discover
-    list_gpus: Callable[[], list[runpod.GpuOffer]] = runpod.list_gpus
+    list_gpus: Callable[[str], list[runpod.GpuOffer]] = runpod.list_gpus
     whoami: Callable[[], str] = hf.whoami
     token: Callable[[], str] = hf.token
     dataset_status: Callable[[str, str], runner.DatasetStatus] = runner.dataset_status
+    tag_dataset: Callable[[str, str], None] = hf.tag_dataset
     check_cameras: Callable[..., object] = runner.check_cameras
     lerobot_ref: Callable[[], plan.LerobotRef] = lambda: plan.default_lerobot_ref(find_lerobot_src())
     list_pods: Callable[[], list[dict[str, Any]]] = lambda: runpod.own_pods(runpod.list_pods())
@@ -52,7 +53,8 @@ class Services:
         offers: list[runpod.GpuOffer] = []
         for _ in range(2):
             try:
-                offers = self.list_gpus()
+                # only the prices are used, and the catalog returns both clouds' prices either way
+                offers = self.list_gpus("SECURE")
                 break
             except Exception:
                 continue
@@ -177,7 +179,7 @@ class SetupScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#datasets", DataTable).add_columns("modified", "dataset", "episodes", "frames", "fps")
-        self.query_one("#gpus", DataTable).add_columns("price", "vram", "stock", "gpu")
+        self.query_one("#gpus", DataTable).add_columns("price", "vram", "stock", "gpu", "in stock at")
         self.query_one("#pods", DataTable).add_columns("pod", "name", "gpu", "price", "status")
         self._apply_policy_defaults()
         self.load_datasets()
@@ -272,9 +274,12 @@ class SetupScreen(Screen):
 
     @work(exclusive=True, group="gpus")
     async def load_gpus(self) -> None:
-        self.set_status("loading GPU prices...")
+        cloud = self.cloud
+        self.offers = []
+        self._fill_gpus()
+        self.set_status(f"loading {cloud} GPU availability...")
         try:
-            self.offers = await asyncio.to_thread(self.services.list_gpus)
+            self.offers = await asyncio.to_thread(self.services.list_gpus, cloud)
         except Exception as exc:
             self.set_status(f"could not list GPUs: {exc}")
             return
@@ -287,8 +292,17 @@ class SetupScreen(Screen):
         table = self.query_one("#gpus", DataTable)
         table.clear()
         for o in self.gpu_rows:
-            table.add_row(f"${o.price(cloud):.2f}/h", f"{o.memory_gb}GB", o.stock or "-", o.gpu_id)
-        self.query_one("#gpu-title", Label).update(f"GPU (>= {p.min_vram_gb}GB, {cloud}, cheapest first)")
+            stock = (o.stock or "-").lower()
+            table.add_row(
+                f"${o.price(cloud):.2f}/h",
+                f"{o.memory_gb}GB",
+                stock if o.available else Text(stock, style="dim"),
+                o.gpu_id if o.available else Text(o.gpu_id, style="dim"),
+                ", ".join(o.data_centers),
+            )
+        self.query_one("#gpu-title", Label).update(
+            f"GPU (>= {p.min_vram_gb}GB, {cloud}, in stock first, then cheapest)"
+        )
 
     @on(Select.Changed, "#policy")
     def policy_changed(self) -> None:
@@ -297,7 +311,7 @@ class SetupScreen(Screen):
 
     @on(Select.Changed, "#cloud")
     def cloud_changed(self) -> None:
-        self._fill_gpus()
+        self.load_gpus()
 
     def _int(self, widget_id: str) -> int:
         raw = self.query_one(f"#{widget_id}", Input).value.strip()
@@ -312,7 +326,7 @@ class SetupScreen(Screen):
             self.notify("no dataset selected", severity="error")
             return
         if not self.gpu_rows:
-            self.notify("no GPU available for this policy/cloud", severity="error")
+            self.notify("RunPod sells no GPU for this policy/cloud", severity="error")
             return
         try:
             steps, batch, max_hours = self._int("steps"), self._int("batch"), self._int("max_hours")
@@ -352,11 +366,28 @@ class SetupScreen(Screen):
                 self.set_status(f"pushing {status.hub_dataset} (private)... this can take a while")
                 await asyncio.to_thread(svc.push_dataset, status)
                 status = replace(status, on_hub=True)
+            if tag := status.missing_tag:
+                add = await self.app.push_screen_wait(
+                    ConfirmScreen(
+                        f"{status.hub_dataset} has no {tag} tag. lerobot loads Hub datasets at that tag "
+                        "(a plain folder upload doesn't create it), so training would crash on the pod."
+                        f"\n\nAdd the {tag} tag to {status.hub_dataset}?",
+                        yes="Add tag",
+                        default_yes=True,
+                    )
+                )
+                if not add:
+                    self.set_status(f"cancelled: training needs the {tag} tag")
+                    return
+                self.set_status(f"tagging {status.hub_dataset} with {tag}...")
+                await asyncio.to_thread(svc.tag_dataset, status.hub_dataset, tag)
             if policy.base_model:
                 self.set_status(f"checking camera names against {policy.base_model}...")
                 await asyncio.to_thread(svc.check_cameras, policy, status)
             self.set_status("resolving lerobot version...")
             ref = await asyncio.to_thread(svc.lerobot_ref)
+            price = next((o.price(self.cloud) for o in self.gpu_rows if o.gpu_id == gpu_id), None)
+            max_price = price * FALLBACK_PRICE_FACTOR if price is not None else None
             train_plan = runner.build_plan(
                 dataset=dataset,
                 hub_dataset=status.hub_dataset,
@@ -368,11 +399,14 @@ class SetupScreen(Screen):
                 batch=batch,
                 max_hours=max_hours,
                 lerobot_ref=ref.ref,
+                max_price=max_price,
             )
-            price = next((o.price(self.cloud) for o in self.gpu_rows if o.gpu_id == gpu_id), None)
             lines = [f"{k:<10} {v}" for k, v in train_plan.summary()]
-            if price is not None:
-                lines.append(f"{'cost':<10} ${price:.2f}/h, at most ~${price * max_hours:.2f}")
+            if price is not None and max_price is not None:
+                lines.append(
+                    f"{'cost':<10} ${price:.2f}/h, at most ~${price * max_hours:.2f} "
+                    f"(~${max_price * max_hours:.2f} on a fallback GPU)"
+                )
             if ref.warning:
                 lines.append(f"\nnote: {ref.warning}")
             self.set_status("")
@@ -413,18 +447,14 @@ class RunScreen(Screen):
         self.train_plan = train_plan
         self.training = services.make_run(train_plan, token, self._emit)
         self.attach_pod = attach_pod
+        self.wait_for_capacity = False
         self.stage = "pod"
         self.finished = False
 
     def compose(self) -> ComposeResult:
         yield Header()
         p = self.train_plan
-        yield Static(
-            f"{p.policy.name} on {p.hub_dataset} · {p.steps} steps · {p.gpu_id} ({p.cloud}) · "
-            f"max {p.max_hours}h",
-            id="plan",
-            markup=False,
-        )
+        yield Static(self._plan_text(), id="plan", markup=False)
         yield Static("", id="stages")
         with Horizontal(id="progress-row"):
             yield ProgressBar(total=p.steps, show_eta=False, id="progress")
@@ -432,6 +462,13 @@ class RunScreen(Screen):
         yield Static("loss: -", id="loss")
         yield RichLog(id="log", max_lines=5000, markup=False, wrap=False)
         yield Footer()
+
+    def _plan_text(self) -> str:
+        p = self.training.plan
+        return (
+            f"{p.policy.name} on {p.hub_dataset} · {p.steps} steps · {p.gpu_id} ({p.cloud}) · "
+            f"max {p.max_hours}h"
+        )
 
     def on_mount(self) -> None:
         self._render_stages()
@@ -494,6 +531,8 @@ class RunScreen(Screen):
             case runner.SystemLine(text=text):
                 self.log_line(Text(f"[pod] {text}", style="dim"))
             case runner.PodCreated():
+                # a fallback GPU may have been placed instead of the chosen one
+                self.query_one("#plan", Static).update(self._plan_text())
                 self.set_stage("starting")
             case runner.Info(text=text, level=level):
                 self.log_line(Text(f"==> {text}", style="yellow" if level == "warn" else "cyan"))
@@ -506,9 +545,12 @@ class RunScreen(Screen):
                 run.attach(self.attach_pod)
                 self._emit(runner.PodCreated(self.attach_pod, run.plan.deadline))
             else:
-                run.create_pod()
+                run.create_pod(wait=self.wait_for_capacity)
         except runpod.CapacityError as exc:
-            self.app.call_from_thread(self._back_to_setup, str(exc))
+            if run.stop.is_set() or self.wait_for_capacity:
+                self.app.call_from_thread(self._back_to_setup, str(exc))
+            else:
+                self.app.call_from_thread(self.ask_to_wait, str(exc))
             return
         except Exception as exc:
             self.app.call_from_thread(self._back_to_setup, f"pod creation failed: {exc}")
@@ -527,6 +569,24 @@ class RunScreen(Screen):
             return
         self.finished = True
         self._emit(runner.Info(f"done. Restart or refresh LeLab to see the run. ({ckpt})"))
+
+    @work(exclusive=True, group="ask")
+    async def ask_to_wait(self, message: str) -> None:
+        wait = await self.app.push_screen_wait(
+            ConfirmScreen(
+                f"{message}\n\nKeep checking every {CAPACITY_POLL_S}s and create the pod as soon as "
+                "one is free? Press x to stop waiting.",
+                yes="Wait for a GPU",
+                no="Back",
+                default_yes=True,
+            )
+        )
+        if not wait:
+            self.app.pop_screen()
+            return
+        self.wait_for_capacity = True
+        self.log_line(Text(f"==> waiting for capacity, checking every {CAPACITY_POLL_S}s", style="yellow"))
+        self.drive()
 
     def _back_to_setup(self, message: str) -> None:
         self.notify(message, severity="error", timeout=20)
@@ -559,6 +619,8 @@ class RunScreen(Screen):
     @work(exclusive=True, group="ask")
     async def action_stop(self) -> None:
         if not self.training.pod_id:
+            # cancels waiting for capacity, if that's what's going on
+            self.training.stop.set()
             self.notify("no pod running")
             return
         if await self.app.push_screen_wait(
@@ -609,8 +671,10 @@ class LerobotRunpodApp(App):
     async def _terminate(self) -> None:
         """LeLab's Stop button SIGTERMs the follower: stop training and delete the pod."""
         for screen in self.screen_stack:
-            if isinstance(screen, RunScreen) and screen.training.pod_id:
-                screen.training.stop.set()
+            if not isinstance(screen, RunScreen):
+                continue
+            screen.training.stop.set()
+            if screen.training.pod_id:
                 await asyncio.to_thread(screen.training.mark, "interrupted", "stopped from LeLab")
                 await asyncio.to_thread(screen.training.delete_pod)
         self.exit(message="stopped from LeLab; pod deleted")

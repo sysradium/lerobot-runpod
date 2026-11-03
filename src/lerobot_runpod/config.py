@@ -13,6 +13,10 @@ CONTAINER_DISK_GB = 50
 FAIL_GRACE_S = 1800
 FALLBACK_LEROBOT_REF = "main"
 POD_NAME_PREFIX = "lerobot-"
+# RunPod documents no polling interval for capacity; this stays far below its rate limits
+CAPACITY_POLL_S = 60
+# when the chosen GPU has no capacity, other fitting GPUs up to this multiple of its price are tried
+FALLBACK_PRICE_FACTOR = 2.0
 
 SKIP_DATASET_OWNERS = frozenset({"calibration", "outputs", "ports", "robots", "inference_logs"})
 

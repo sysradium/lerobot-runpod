@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import threading
@@ -238,7 +239,7 @@ def test_sigterm_from_lelab_deletes_the_pod_without_asking(lerobot_home, monkeyp
 def test_attach_refuses_when_another_process_follows(lerobot_home, monkeypatch):
     run, _ = make_run(lerobot_home)
     monkeypatch.setattr(cli.runpod, "get_pod", lambda pod_id: {"id": pod_id})
-    monkeypatch.setattr(cli.runpod, "list_gpus", lambda: [])
+    monkeypatch.setattr(cli.runpod, "list_gpus", lambda cloud: [])
     monkeypatch.setattr(cli.runner, "plan_from_pod", lambda pod, offers: run.plan)
     monkeypatch.setattr(cli.runner, "active_follower", lambda job_dir, pod_id=None: 4242)
     with pytest.raises(cli.Abort, match="pid 4242 is already following"):
@@ -286,3 +287,100 @@ def test_active_follower_spots_a_foreign_log_stream(lerobot_home, monkeypatch):
     monkeypatch.setattr(runner, "run", fake_run)
     assert runner.active_follower(run.plan.job_dir, "q2x44ipzuu0xo4") == 8888
     assert runner.active_follower(run.plan.job_dir) is None
+
+
+def placing_run(lerobot_home, monkeypatch, offers, free, max_price=None):
+    """A run whose `runpodctl pod create` only succeeds for the (gpu, data center) pairs in free."""
+    run, events = make_run(lerobot_home)
+    run.pod_id = None
+    run.plan = dataclasses.replace(run.plan, max_price=max_price)
+    tried = []
+
+    def create(cmd):
+        gpu = cmd[cmd.index("--gpu-id") + 1]
+        dc = cmd[cmd.index("--data-center-ids") + 1] if "--data-center-ids" in cmd else None
+        tried.append((gpu, dc))
+        if (gpu, dc) not in free:
+            raise runner.runpod.CapacityError("no capacity")
+        return f"pod-{len(tried)}"
+
+    monkeypatch.setattr(runner.runpod, "list_gpus", lambda cloud: offers)
+    monkeypatch.setattr(runner.runpod, "create_pod", create)
+    return run, events, tried
+
+
+GpuOffer = runner.runpod.GpuOffer
+
+
+def test_create_pod_tries_data_centers_then_fallback_gpus(lerobot_home, monkeypatch):
+    offers = [
+        GpuOffer("NVIDIA GeForce RTX 3090", 24, True, 0.46, 0.22, "LOW", ("EU-RO-1", "US-TX-3")),
+        GpuOffer("NVIDIA RTX A6000", 48, True, 0.59, 0.33, "LOW", ("CA-MTL-1",)),
+        GpuOffer("NVIDIA A100 80GB PCIe", 80, True, 1.79, 1.19, "HIGH", ("US-KS-2",)),
+    ]
+    run, events, tried = placing_run(
+        lerobot_home, monkeypatch, offers, {("NVIDIA RTX A6000", "CA-MTL-1")}, max_price=0.44
+    )
+    assert run.create_pod() == "pod-3"
+    assert tried == [
+        ("NVIDIA GeForce RTX 3090", "EU-RO-1"),
+        ("NVIDIA GeForce RTX 3090", "US-TX-3"),
+        ("NVIDIA RTX A6000", "CA-MTL-1"),
+    ]
+    assert run.pod_id == "pod-3"
+    assert run.plan.gpu_id == "NVIDIA RTX A6000"
+    assert any("using NVIDIA RTX A6000 at $0.33/h" in getattr(e, "text", "") for e in events)
+
+
+def test_create_pod_without_fallback_reports_capacity(lerobot_home, monkeypatch):
+    offers = [
+        GpuOffer("NVIDIA GeForce RTX 3090", 24, False, 0.46, 0.22, "NONE"),
+        GpuOffer("NVIDIA RTX A6000", 48, True, 0.59, 0.33, "LOW", ("CA-MTL-1",)),
+    ]
+    run, _, tried = placing_run(lerobot_home, monkeypatch, offers, set())
+    with pytest.raises(
+        runner.runpod.CapacityError, match="no COMMUNITY capacity for NVIDIA GeForce RTX 3090"
+    ):
+        run.create_pod()
+    # out of stock per the catalog, but the catalog is only a hint: one try anywhere
+    assert tried == [("NVIDIA GeForce RTX 3090", None)]
+    assert run.pod_id is None
+
+
+def test_create_pod_waits_until_capacity_appears(lerobot_home, monkeypatch):
+    out = [GpuOffer("NVIDIA GeForce RTX 3090", 24, False, 0.46, 0.22, "NONE")]
+    back = [GpuOffer("NVIDIA GeForce RTX 3090", 24, True, 0.46, 0.22, "LOW", ("EU-RO-1",))]
+    run, _, tried = placing_run(lerobot_home, monkeypatch, out, {("NVIDIA GeForce RTX 3090", "EU-RO-1")})
+    catalogs = iter([out, out, back])
+    monkeypatch.setattr(runner.runpod, "list_gpus", lambda cloud: next(catalogs))
+    monkeypatch.setattr(runner, "CAPACITY_POLL_S", 0)
+    assert run.create_pod(wait=True) == "pod-3"
+    assert tried[-1] == ("NVIDIA GeForce RTX 3090", "EU-RO-1")
+
+
+def test_create_pod_stops_waiting_when_asked(lerobot_home, monkeypatch):
+    offers = [GpuOffer("NVIDIA GeForce RTX 3090", 24, False, 0.46, 0.22, "NONE")]
+    run, _, tried = placing_run(lerobot_home, monkeypatch, offers, set())
+    monkeypatch.setattr(runner, "CAPACITY_POLL_S", 0.01)
+
+    def create(cmd):
+        tried.append(cmd)
+        if len(tried) == 2:
+            run.stop.set()
+        raise runner.runpod.CapacityError("no capacity")
+
+    monkeypatch.setattr(runner.runpod, "create_pod", create)
+    with pytest.raises(runner.runpod.CapacityError):
+        run.create_pod(wait=True)
+    assert len(tried) == 2
+
+
+def test_missing_version_tag(monkeypatch):
+    tags = {"me/tagged": ["v3.0"], "me/uploaded": [], "me/odd": ["release"]}
+    infos = {"me/uploaded": {"codebase_version": "v3.0"}, "me/odd": {}}
+    monkeypatch.setattr(runner.hf, "dataset_tags", lambda repo: tags[repo])
+    monkeypatch.setattr(runner.hf, "download_json", lambda repo, name, repo_type: infos[repo])
+    assert runner.missing_version_tag("me/tagged") is None
+    assert runner.missing_version_tag("me/uploaded") == "v3.0"
+    with pytest.raises(ValueError, match="no codebase_version"):
+        runner.missing_version_tag("me/odd")

@@ -34,7 +34,7 @@ class FakeRun:
         self.pod_id = pod_id
         self.attached = pod_id
 
-    def create_pod(self):
+    def create_pod(self, wait=False):
         self.pod_id = "pod1"
         self.emit(runner.PodCreated("pod1", int(time.time()) + 3600))
         return "pod1"
@@ -76,7 +76,7 @@ def make_services(tmp_path, runs):
             local_ds("sysradium/second_try_cam1", 2000, tmp_path),
             local_ds("local/first", 1000, tmp_path),
         ],
-        list_gpus=lambda: OFFERS,
+        list_gpus=lambda cloud: OFFERS,
         whoami=lambda: "sysradium",
         token=lambda: "hf_fake",
         dataset_status=lambda ds, user: runner.DatasetStatus(ds, ds, True, tmp_path / ds),
@@ -147,6 +147,66 @@ def test_start_confirm_and_run_to_done(tmp_path, lerobot_home):
             assert "loss 3.15" in str(run_screen.query_one("#loss", Static).render())
             assert runs[0].deleted == ["pod1"]
             assert runs[0].plan.steps == 200
+
+    asyncio.run(scenario())
+
+
+def test_untagged_hub_dataset_is_tagged_before_the_pod(tmp_path, lerobot_home):
+    runs, tagged = [], []
+
+    async def scenario():
+        services = make_services(tmp_path, runs)
+        services.dataset_status = lambda ds, user: runner.DatasetStatus(ds, ds, True, tmp_path / ds, "v3.0")
+        services.tag_dataset = lambda repo, tag: tagged.append((repo, tag))
+        app = tui.LerobotRunpodApp(services)
+        async with app.run_test(size=(140, 45)) as pilot:
+            await wait_for(pilot, lambda: app.screen.query_one("#gpus", DataTable).row_count == 3)
+            await pilot.click("#start")
+            await wait_for(pilot, lambda: isinstance(app.screen, tui.ConfirmScreen))
+            assert "no v3.0 tag" in app.screen.message
+            await pilot.click("#yes")
+            await wait_for(
+                pilot,
+                lambda: isinstance(app.screen, tui.ConfirmScreen) and "Training plan" in app.screen.message,
+            )
+            assert tagged == [("sysradium/second_try_cam1", "v3.0")]
+
+    asyncio.run(scenario())
+
+
+class NoCapacityRun(FakeRun):
+    def __init__(self, train_plan, emit):
+        super().__init__(train_plan, emit)
+        self.waits = []
+
+    def create_pod(self, wait=False):
+        self.waits.append(wait)
+        if not wait:
+            raise runpod.CapacityError("no COMMUNITY capacity for NVIDIA GeForce RTX 3090")
+        return super().create_pod()
+
+
+def test_no_capacity_offers_to_wait_then_runs(tmp_path, lerobot_home):
+    runs = []
+
+    async def scenario():
+        services = make_services(tmp_path, runs)
+        services.make_run = lambda p, token, emit: runs.append(NoCapacityRun(p, emit)) or runs[-1]
+        app = tui.LerobotRunpodApp(services)
+        async with app.run_test(size=(140, 45)) as pilot:
+            await wait_for(pilot, lambda: app.screen.query_one("#gpus", DataTable).row_count == 3)
+            await pilot.click("#start")
+            await wait_for(pilot, lambda: isinstance(app.screen, tui.ConfirmScreen))
+            assert "fallback" in app.screen.message
+            await pilot.click("#yes")
+            await wait_for(
+                pilot,
+                lambda: isinstance(app.screen, tui.ConfirmScreen) and "Keep checking" in app.screen.message,
+            )
+            await pilot.click("#yes")
+            await wait_for(pilot, lambda: runs and runs[0].delivered)
+            assert runs[0].waits == [False, True]
+            assert runs[0].plan.max_price == 0.44
 
     asyncio.run(scenario())
 

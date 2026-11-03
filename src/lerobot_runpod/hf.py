@@ -43,6 +43,21 @@ def dataset_exists(repo_id: str) -> bool:
     return run(["hf", "datasets", "info", repo_id], check=False).returncode == 0
 
 
+def dataset_tags(repo_id: str) -> list[str]:
+    cmd = ["hf", "repos", "tag", "list", repo_id, "--repo-type", "dataset", "--format", "json"]
+    try:
+        return [str(tag["name"]) for tag in json.loads(run(cmd).stdout)]
+    except (CommandError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise HfError(f"could not list the tags of {repo_id}") from exc
+
+
+def tag_dataset(repo_id: str, tag: str) -> None:
+    try:
+        run(["hf", "repos", "tag", "create", repo_id, tag, "--repo-type", "dataset"])
+    except CommandError as exc:
+        raise HfError(f"could not tag {repo_id} with {tag}: {exc}") from exc
+
+
 def download_json(repo_id: str, filename: str, repo_type: str = "model") -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as tmp:
         cmd = ["hf", "download", repo_id, filename, "--local-dir", tmp, "--quiet"]

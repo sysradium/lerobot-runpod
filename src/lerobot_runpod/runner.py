@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from . import cameras, datasets, deliver, hf, logs, plan, policies, runpod
-from .config import find_lerobot_src, outputs_dir
+from .config import CAPACITY_POLL_S, find_lerobot_src, outputs_dir
 from .shell import run
 
 
@@ -44,15 +45,37 @@ class DatasetStatus:
     hub_dataset: str
     on_hub: bool
     local_path: Path
+    # the codebase-version tag the Hub dataset lacks, see missing_version_tag
+    missing_tag: str | None = None
 
     @property
     def can_push(self) -> bool:
         return (self.local_path / "meta/info.json").is_file()
 
 
+VERSION_TAG = re.compile(r"^v\d+\.\d+$")
+
+
+def missing_version_tag(hub_dataset: str) -> str | None:
+    """The tag to create so lerobot can load this Hub dataset, or None if it has one.
+
+    lerobot loads Hub datasets at a codebase-version tag (e.g. v3.0) that only
+    LeRobotDataset.push_to_hub creates. A plain folder upload has none, and lerobot 0.6.0 then
+    crashes on the pod with an unrelated-looking `HfHubHTTPError.__init__() missing ... 'response'`.
+    """
+    if any(VERSION_TAG.match(tag) for tag in hf.dataset_tags(hub_dataset)):
+        return None
+    version = hf.download_json(hub_dataset, "meta/info.json", repo_type="dataset").get("codebase_version")
+    if not isinstance(version, str) or not VERSION_TAG.match(version):
+        raise ValueError(f"{hub_dataset} has no version tag and no codebase_version in meta/info.json")
+    return version
+
+
 def dataset_status(dataset: str, hf_user: str) -> DatasetStatus:
     hub_id = datasets.hub_id(dataset, hf_user)
-    return DatasetStatus(dataset, hub_id, hf.dataset_exists(hub_id), datasets.local_path(dataset))
+    on_hub = hf.dataset_exists(hub_id)
+    missing_tag = missing_version_tag(hub_id) if on_hub else None
+    return DatasetStatus(dataset, hub_id, on_hub, datasets.local_path(dataset), missing_tag)
 
 
 def check_cameras(policy: policies.Policy, status: DatasetStatus) -> cameras.CameraCheck | None:
@@ -83,6 +106,7 @@ def build_plan(
     extra_train_args: tuple[str, ...] = (),
     repo: str | None = None,
     lerobot_ref: str | None = None,
+    max_price: float | None = None,
     now: datetime | None = None,
 ) -> plan.TrainPlan:
     now = now or datetime.now()
@@ -100,6 +124,7 @@ def build_plan(
         cloud=cloud,
         repo=repo or plan.default_repo(hf_user, policy.name, name, now),
         lerobot_ref=lerobot_ref or plan.resolve_lerobot_ref(find_lerobot_src()).ref,
+        max_price=max_price,
         created_at=now,
     )
 
@@ -257,14 +282,48 @@ class TrainingRun:
     def log_path(self) -> Path:
         return self.plan.job_dir / "log.jsonl"
 
-    def create_pod(self) -> str:
-        self.plan = self.plan.with_fresh_deadline()
-        self.emit(Info(f"creating pod on {self.plan.gpu_id} ({self.plan.cloud})"))
-        self.pod_id = runpod.create_pod(self.plan.pod_command(self.hf_token))
-        self.state.started_at = time.time()
-        self.emit(PodCreated(self.pod_id, self.plan.deadline))
-        self.emit(Info(f"pod {self.pod_id} created: {runpod.console_url(self.pod_id)}"))
-        return self.pod_id
+    def create_pod(self, *, wait: bool = False) -> str:
+        """With wait, keeps checking for capacity every CAPACITY_POLL_S until a pod places or stop is set."""
+        while True:
+            try:
+                return self._place()
+            except runpod.CapacityError as exc:
+                if not wait or self.stop.is_set():
+                    raise
+                self.emit(Info(f"{exc}; checking again in {CAPACITY_POLL_S}s", "warn"))
+            if self.stop.wait(CAPACITY_POLL_S):
+                raise runpod.CapacityError("stopped waiting for a GPU")
+
+    def _place(self) -> str:
+        p = self.plan
+        offers = runpod.list_gpus(p.cloud)
+        candidates = runpod.placement_candidates(offers, p.gpu_id, p.cloud, p.policy.min_vram_gb, p.max_price)
+        prices = {o.gpu_id: o.price(p.cloud) for o in offers}
+        for gpu_id, data_center in candidates:
+            if self.stop.is_set():
+                raise runpod.CapacityError("stopped waiting for a GPU")
+            attempt = replace(p, gpu_id=gpu_id).with_fresh_deadline()
+            where = f" in {data_center}" if data_center else ""
+            self.emit(Info(f"creating pod on {gpu_id} ({p.cloud}){where}"))
+            try:
+                pod_id = runpod.create_pod(attempt.pod_command(self.hf_token, data_center))
+            except runpod.CapacityError:
+                self.emit(Info(f"no capacity for {gpu_id}{where}", "warn"))
+                continue
+            self.plan, self.pod_id = attempt, pod_id
+            if self.stop.is_set():
+                self.delete_pod()
+                raise runpod.CapacityError("stopped waiting for a GPU")
+            if gpu_id != p.gpu_id:
+                price = prices.get(gpu_id)
+                cost = f" at ${price:.2f}/h" if price is not None else ""
+                self.emit(Info(f"{p.gpu_id} had no capacity; using {gpu_id}{cost} instead", "warn"))
+            self.state.started_at = time.time()
+            self.emit(PodCreated(pod_id, attempt.deadline))
+            self.emit(Info(f"pod {pod_id} created: {runpod.console_url(pod_id)}"))
+            return pod_id
+        fallback = f" or another GPU up to ${p.max_price:.2f}/h" if p.max_price is not None else ""
+        raise runpod.CapacityError(f"no {p.cloud} capacity for {p.gpu_id}{fallback}")
 
     def attach(self, pod_id: str) -> None:
         """Follow a pod that already exists (created by an earlier run)."""
